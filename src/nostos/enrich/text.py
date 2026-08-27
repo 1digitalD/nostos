@@ -122,7 +122,7 @@ _TEXT_PART_KEYS = ("title", "description", "address", "notes", "listingText", "l
 _NB_TEXT_PART_KEYS = ("title", "address", "structuredLocation", "structured_location")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class TextRuleEnricher:
     name: str = "text-rule"
     provides: frozenset[str] = frozenset(
@@ -193,7 +193,11 @@ def recover_missing_attributes(
         if match is not None:
             currency = _context_currency(context)
             updates["rent"] = _observed(
-                Money(amount=Decimal(match.group(1).replace(",", "")), currency=currency, period="month"),
+                Money(
+                    amount=Decimal(match.group(1).replace(",", "")),
+                    currency=currency,
+                    period="month",
+                ),
                 evidence=match.group(0).strip(),
                 observed_at=observed_time,
                 confidence=confidence,
@@ -301,7 +305,9 @@ def recover_missing_attributes(
                 )
 
     if listing.place.area_key is None and _attribute_is_fillable(listing, "area_key"):
-        nb_text = " ".join(text_parts[key] for key in _NB_TEXT_PART_KEYS if key in text_parts).strip()
+        nb_text = " ".join(
+            text_parts[key] for key in _NB_TEXT_PART_KEYS if key in text_parts
+        ).strip()
         area_match = _area_key_from_text(nb_text, context)
         if area_match is not None:
             area_key, evidence = area_match

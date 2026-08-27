@@ -13,7 +13,11 @@ from nostos.model.value import Money, Place
 OBSERVED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
-def make_listing(*, description: str, rent: Observed[Money] | Absence = Absence.NOT_STATED) -> Listing:
+def make_listing(
+    *,
+    description: str,
+    rent: Observed[Money] | Absence = Absence.NOT_STATED,
+) -> Listing:
     return Listing(
         identity=Identity(
             listing_id="listing-1",
