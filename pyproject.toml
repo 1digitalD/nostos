@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Nostos Contributors" }]
 dependencies = [
+  "pydantic>=2.13.4",
   "typer",
 ]
 
