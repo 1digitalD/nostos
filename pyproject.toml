@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nostos-cli"
+version = "0.1.0"
+description = "Self-hosted rental-market watch ranked by your rubric."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Nostos Contributors" }]
+dependencies = [
+  "typer",
+]
+
+[project.urls]
+Homepage = "https://github.com/1digitalD/nostos"
+Repository = "https://github.com/1digitalD/nostos"
+Issues = "https://github.com/1digitalD/nostos/issues"
+
+[project.scripts]
+nostos = "nostos.cli:app"
+
+[dependency-groups]
+dev = [
+  "mypy",
+  "pytest",
+  "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nostos"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
