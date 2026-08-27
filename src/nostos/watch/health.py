@@ -5,6 +5,7 @@ import math
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from statistics import median
 from typing import Any
 
@@ -138,7 +139,8 @@ def evaluate_source(
     can_advance = source.status != "failed" and baseline.within_band
     candidate = source.candidate_watermark
     previous = history.watermark
-    advanced = bool(candidate) and can_advance
+    # Watermark is observational (max observed fetched_at), so only advance monotonically.
+    advanced = can_advance and _is_newer_watermark(candidate=candidate, previous=previous)
     effective = candidate if advanced else previous
 
     alerts: list[str] = []
@@ -161,6 +163,25 @@ def evaluate_source(
         ),
         alerts=tuple(alerts),
     )
+
+
+def _is_newer_watermark(*, candidate: str | None, previous: str | None) -> bool:
+    if not candidate:
+        return False
+    if not previous:
+        return True
+    parsed_candidate = _parse_iso(candidate)
+    parsed_previous = _parse_iso(previous)
+    if parsed_candidate is not None and parsed_previous is not None:
+        return parsed_candidate > parsed_previous
+    return candidate > previous
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _baseline_band(

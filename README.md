@@ -28,6 +28,16 @@ uv run mypy --strict src tests
 uv run pytest
 ```
 
+## One-sitting CLI flow
+
+Go from setup to ranked output in one sitting:
+
+```bash
+uv run nostos init
+uv run nostos watch --yes
+uv run nostos list --limit 20
+```
+
 ## License
 
 Apache-2.0.

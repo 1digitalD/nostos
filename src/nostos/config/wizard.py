@@ -38,12 +38,12 @@ class WizardAnswers:
     max_rent: float
     beds: float
     laundry: PreferenceLevel
-    parking: PreferenceLevel
-    pets: PetsPreference
+    parking: PreferenceLevel | None
+    pets: PetsPreference | None
     source_names: tuple[str, ...]
     notify_urls: tuple[str, ...]
-    baths_min: float | None = 1.0
-    baths_max: float | None = 2.0
+    baths_min: float | None = None
+    baths_max: float | None = None
     min_area: float | None = None
     avoid_basement: bool = True
     require_unfurnished: bool = True
@@ -55,7 +55,6 @@ def missing_required_values(
     max_rent: float | None,
     beds: float | None,
     laundry: PreferenceLevel | None,
-    pets: PetsPreference | None,
 ) -> tuple[str, ...]:
     missing: list[str] = []
     if max_rent is None:
@@ -64,8 +63,6 @@ def missing_required_values(
         missing.append("--beds")
     if laundry is None:
         missing.append("--laundry")
-    if pets is None:
-        missing.append("--pets")
     return tuple(missing)
 
 
@@ -100,17 +97,8 @@ def build_profile_payload(*, answers: WizardAnswers, citypack: Citypack) -> dict
     if building_laundry_weight != 0:
         weights["laundry.building"] = building_laundry_weight
 
-    parking_weight = _parking_weight(answers.parking)
-    if parking_weight != 0:
-        weights["parking.available"] = parking_weight
-
-    pets_weight = _pets_weight(answers.pets)
-    if pets_weight != 0:
-        weights["pets.allowed"] = pets_weight
-
     if answers.min_area is not None:
         weights["area.over_minimum"] = {"per_100_sqft": 4, "cap": 12}
-    weights["rent.headroom"] = {"per_100": 1, "cap": 15}
 
     selected_sources = {name for name in answers.source_names}
     source_toggles: dict[str, str] = {}

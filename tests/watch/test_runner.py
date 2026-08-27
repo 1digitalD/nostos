@@ -7,6 +7,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
+import nostos.watch.runner as runner_module
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
@@ -128,6 +131,124 @@ def test_load_bearing_zero_triggers_alert_non_load_bearing_zero_does_not(
     assert "non_lb_zero" not in joined
 
 
+def test_check_liveness_exception_is_isolated_per_source(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "good": {"enabled": True, "load_bearing": False},
+            "liveness_broken": {"enabled": True, "load_bearing": False},
+        }
+    )
+    good_source = ScriptedSource(
+        name="good",
+        records=(_make_record("good", 1, minutes=1),),
+    )
+    liveness_broken_source = ScriptedSource(
+        name="liveness_broken",
+        records=(_make_record("liveness_broken", 1, minutes=2),),
+        check_liveness_error=RuntimeError("liveness exploded"),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(good_source, liveness_broken_source),
+            profile_id="balanced",
+            run_id="run-liveness-isolated",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        assert report.source_reports["good"].status == "ok"
+        assert report.source_reports["good"].count == 1
+        assert report.source_reports["liveness_broken"].status == "degraded"
+        assert report.source_reports["liveness_broken"].count == 0
+
+        run_row = RunRepo(conn).get_run(report.run_id)
+        assert run_row is not None
+        assert run_row.finished_at is not None
+        assert _source_counts(run_row.counts_json, "good")["count"] == 1
+
+
+def test_collect_sources_isolates_future_result_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "good": {"enabled": True, "load_bearing": False},
+            "bad": {"enabled": True, "load_bearing": False},
+        }
+    )
+    good_source = ScriptedSource(
+        name="good",
+        records=(_make_record("good", 1, minutes=1),),
+    )
+    bad_source = ScriptedSource(
+        name="bad",
+        records=(_make_record("bad", 1, minutes=2),),
+    )
+    original = runner_module._collect_source_snapshot
+
+    def crashing_collect(*, source: Any, context: Any) -> Any:
+        if source.name == "bad":
+            raise RuntimeError("thread snapshot crash")
+        return original(source=source, context=context)
+
+    monkeypatch.setattr(runner_module, "_collect_source_snapshot", crashing_collect)
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(good_source, bad_source),
+            profile_id="balanced",
+            run_id="run-future-isolated",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        assert report.source_reports["good"].status == "ok"
+        assert report.source_reports["good"].count == 1
+        assert report.source_reports["bad"].status == "failed"
+        assert report.source_reports["bad"].count == 0
+
+
+def test_notify_failure_does_not_leave_run_unfinished(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "stub": {"enabled": True, "load_bearing": False},
+        }
+    )
+    source = ScriptedSource(
+        name="stub",
+        records=(_make_record("stub", 1, minutes=1),),
+    )
+
+    class FailingNotifier:
+        def send(self, *, title: str, body: str) -> None:
+            del title, body
+            raise RuntimeError("sink outage")
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            notifier=FailingNotifier(),
+            run_id="run-notify-fails",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        run_row = RunRepo(conn).get_run(report.run_id)
+        assert run_row is not None
+        assert run_row.finished_at is not None
+
+
 def test_per_source_counts_are_written_to_run_row(tmp_path: Path) -> None:
     db_path = tmp_path / "nostos.db"
     context = _build_context(
@@ -237,6 +358,136 @@ def test_watermark_does_not_advance_when_count_is_far_below_baseline(tmp_path: P
         assert source_counts["watermark"]["effective"] == previous_watermark
 
 
+def test_watermark_advances_when_within_band_and_candidate_is_newer(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    source_name = "steady"
+    context = _build_context(
+        source_flags={
+            source_name: {"enabled": True, "load_bearing": False},
+        }
+    )
+    previous_watermark = "2026-01-02T00:10:00+00:00"
+    new_watermark = "2026-01-02T01:00:00+00:00"
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_repo = RunRepo(conn)
+        for index in range(3):
+            run_id = f"historical-ok-{index}"
+            started_at = datetime(2026, 1, 1, 0, 0, index, tzinfo=UTC)
+            counts_json = cast(
+                dict[str, Any],
+                {
+                "sources": {
+                    source_name: {
+                        "count": 10,
+                        "status": "ok",
+                        "watermark": {
+                            "advanced": True,
+                            "effective": previous_watermark,
+                        },
+                    }
+                }
+                },
+            )
+            run_repo.create_run(
+                run_id=run_id,
+                started_at=started_at,
+                sources_json={"sources": [source_name]},
+                counts_json=counts_json,
+            )
+            run_repo.finish_run(
+                run_id=run_id,
+                finished_at=started_at + timedelta(minutes=1),
+                counts_json=counts_json,
+            )
+
+        source = ScriptedSource(
+            name=source_name,
+            records=(
+                _make_record(
+                    source_name,
+                    1,
+                    minutes=30,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    2,
+                    minutes=31,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    3,
+                    minutes=32,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    4,
+                    minutes=33,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    5,
+                    minutes=34,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    6,
+                    minutes=35,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    7,
+                    minutes=36,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    8,
+                    minutes=37,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    9,
+                    minutes=38,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+                _make_record(
+                    source_name,
+                    10,
+                    minutes=39,
+                    fetched_at=datetime.fromisoformat(new_watermark),
+                ),
+            ),
+        )
+        report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-watermark-advance",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        source_report = report.source_reports[source_name]
+        assert source_report.within_baseline_band is True
+        assert source_report.watermark_advanced is True
+        assert source_report.effective_watermark == new_watermark
+
+        run_row = RunRepo(conn).get_run(report.run_id)
+        assert run_row is not None
+        source_counts = _source_counts(run_row.counts_json, source_name)
+        assert source_counts["watermark"]["advanced"] is True
+        assert source_counts["watermark"]["effective"] == new_watermark
+
+
 class ScriptedSource:
     def __init__(
         self,
@@ -244,6 +495,7 @@ class ScriptedSource:
         name: str,
         records: tuple[SourceRecord, ...],
         discover_error: Exception | None = None,
+        check_liveness_error: Exception | None = None,
     ) -> None:
         self.name = name
         self.capabilities = Capabilities(
@@ -254,6 +506,7 @@ class ScriptedSource:
         )
         self._records = records
         self._discover_error = discover_error
+        self._check_liveness_error = check_liveness_error
 
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
         del ctx
@@ -265,6 +518,8 @@ class ScriptedSource:
         return rec
 
     def check_liveness(self, rec: SourceRecord) -> Liveness:
+        if self._check_liveness_error is not None:
+            raise self._check_liveness_error
         marker = rec.payload.get("liveness") if isinstance(rec.payload, dict) else None
         if marker in {"ok", "degraded", "failed"}:
             return Liveness(str(marker))
