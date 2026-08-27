@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from nostos.model.listing import Origin
+from nostos.model.source_record import JSONValue
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ListingRepo, ObservationRepo, ScoreRepo
 
@@ -65,12 +67,14 @@ def test_observation_projection_prefers_highest_precedence_origin(tmp_path: Path
         )
 
         projection = observation_repo.project_listing_fields(listing_id)
-        assert projection["beds"]["origin"] == Origin.SOURCE_FIELD.value
-        assert projection["beds"]["value"] == 2.0
+        projected_beds = cast(dict[str, JSONValue], projection["beds"])
+        assert projected_beds["origin"] == Origin.SOURCE_FIELD.value
+        assert projected_beds["value"] == 2.0
 
         projected_listing = listing_repo.get_fields_projection(listing_id)
-        assert projected_listing["beds"]["origin"] == Origin.SOURCE_FIELD.value
-        assert projected_listing["beds"]["value"] == 2.0
+        listing_projected_beds = cast(dict[str, JSONValue], projected_listing["beds"])
+        assert listing_projected_beds["origin"] == Origin.SOURCE_FIELD.value
+        assert listing_projected_beds["value"] == 2.0
 
 
 def test_score_repo_keys_writes_by_profile_id(tmp_path: Path) -> None:
