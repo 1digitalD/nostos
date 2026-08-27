@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Nostos Contributors" }]
 dependencies = [
+  "apprise",
   "extruct>=0.18.0",
   "httpx>=0.28.1",
   "pydantic>=2.13.4",
@@ -42,7 +43,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["extruct"]
+module = ["apprise", "extruct"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
