@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 DEFAULT_DIRECTIONAL_ABBREVIATIONS: Mapping[str, str] = MappingProxyType(
@@ -66,7 +66,9 @@ class AddressNormalizationTokens:
     city_province_postal_tokens: frozenset[str]
     city_directional_prefixes: frozenset[str]
     street_type_tokens: frozenset[str] = DEFAULT_STREET_TYPE_TOKENS
-    directional_abbreviations: Mapping[str, str] = DEFAULT_DIRECTIONAL_ABBREVIATIONS
+    directional_abbreviations: Mapping[str, str] = field(
+        default_factory=lambda: DEFAULT_DIRECTIONAL_ABBREVIATIONS
+    )
 
 
 DEFAULT_ADDRESS_TOKENS = AddressNormalizationTokens(
