@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from nostos.config.citypack import Citypack
@@ -19,11 +20,26 @@ from nostos.model import (
     SourceRecord,
 )
 from nostos.sources.base import Capabilities, Liveness, Source
+from nostos.sources.craigslist import CraigslistSource
+
+CRAIGSLIST_FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
 
 
 def test_stub_source_passes_source_conformance_suite() -> None:
     context = _build_context()
     source = StubSource(name="stub")
+    assert_source_conforms(source=source, context=context)
+
+
+def test_craigslist_source_passes_source_conformance_suite_offline() -> None:
+    context = _build_context(
+        profile_sources={"craigslist": True},
+        citypack_sources={"craigslist": True},
+    )
+    source = CraigslistSource(
+        fetch_text=_craigslist_fixture_fetch_text,
+        now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
     assert_source_conforms(source=source, context=context)
 
 
@@ -169,7 +185,24 @@ def _text(payload: Mapping[str, Any], key: str) -> str | None:
     return str(value)
 
 
-def _build_context() -> SearchContext:
+def _craigslist_fixture_fetch_text(url: str) -> str:
+    if "format=rss" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "rss.xml").read_text(encoding="utf-8")
+    if "AbC123xYz9" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "detail.html").read_text(encoding="utf-8")
+    if "zZ9yY8xX7w" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "detail.html").read_text(encoding="utf-8")
+    raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+
+def _build_context(
+    *,
+    profile_sources: Mapping[str, bool] | None = None,
+    citypack_sources: Mapping[str, bool] | None = None,
+) -> SearchContext:
+    profile_source_map = dict(profile_sources or {"stub": True})
+    citypack_source_map = dict(citypack_sources or {"stub": True})
+
     citypack = Citypack.model_validate(
         {
             "name": "vancouver",
@@ -187,7 +220,10 @@ def _build_context() -> SearchContext:
                     "bbox": [49.262, -123.190, 49.278, -123.145],
                 }
             ],
-            "sources": {"stub": {"enabled": True, "load_bearing": False}},
+            "sources": {
+                name: {"enabled": bool(enabled), "load_bearing": False}
+                for name, enabled in citypack_source_map.items()
+            },
             "address": {
                 "directional": {"w": "west"},
                 "strip_tokens": ["vancouver"],
@@ -200,7 +236,7 @@ def _build_context() -> SearchContext:
             "city": "vancouver",
             "hard": {"exclude": []},
             "weights": {},
-            "sources": {"stub": "on"},
+            "sources": profile_source_map,
             "notify": [],
             "schedule": "0 */6 * * *",
         }

@@ -11,7 +11,9 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Nostos Contributors" }]
 dependencies = [
+  "httpx",
   "pydantic>=2.13.4",
+  "selectolax",
   "typer",
 ]
 
