@@ -1,0 +1,48 @@
+{
+  "name": "vancouver",
+  "locale": {
+    "language": "en-CA",
+    "timezone": "America/Vancouver",
+    "currency": "CAD",
+    "area_unit": "sqft"
+  },
+  "areas": [
+    {
+      "key": "kits_beach",
+      "label": "Kitsilano",
+      "keywords": ["kitsilano", "kits point", "4th & york"],
+      "bbox": [49.262, -123.19, 49.278, -123.145]
+    },
+    {
+      "key": "mount_pleasant",
+      "label": "Mount Pleasant",
+      "keywords": ["mount pleasant", "main street", "fraser"],
+      "bbox": [49.254, -123.115, 49.272, -123.085]
+    }
+  ],
+  "sources": {
+    "craigslist": {
+      "enabled": true,
+      "load_bearing": true,
+      "base_url": "https://vancouver.craigslist.org",
+      "areas": ["van", "nvn", "bby"]
+    },
+    "kijiji": {
+      "enabled": true,
+      "load_bearing": false,
+      "regions": [{"path": "vancouver", "id": "c37l1700287"}]
+    }
+  },
+  "address": {
+    "directional": {
+      "w": "west",
+      "e": "east",
+      "n": "north",
+      "s": "south",
+      "nw": "northwest",
+      "ne": "northeast"
+    },
+    "strip_tokens": ["vancouver", "burnaby", "north vancouver"],
+    "region_tokens": ["bc", "british columbia"]
+  }
+}
