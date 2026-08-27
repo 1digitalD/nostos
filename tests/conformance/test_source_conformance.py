@@ -20,12 +20,24 @@ from nostos.model import (
     SourceRecord,
 )
 from nostos.sources.base import Capabilities, Liveness, Source
+from nostos.sources.craigslist import CraigslistSource
 from nostos.sources.kijiji import KijijiSource
+
+CRAIGSLIST_FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
 
 
 def test_stub_source_passes_source_conformance_suite() -> None:
     context = _build_context()
     source = StubSource(name="stub")
+    assert_source_conforms(source=source, context=context)
+
+
+def test_craigslist_source_passes_source_conformance_suite_offline() -> None:
+    context = _build_context_for_craigslist()
+    source = CraigslistSource(
+        fetch_text=_craigslist_fixture_fetch_text,
+        now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
     assert_source_conforms(source=source, context=context)
 
 
@@ -180,6 +192,16 @@ def _text(payload: Mapping[str, Any], key: str) -> str | None:
     return str(value)
 
 
+def _craigslist_fixture_fetch_text(url: str) -> str:
+    if "format=rss" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "rss.xml").read_text(encoding="utf-8")
+    if "AbC123xYz9" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "detail.html").read_text(encoding="utf-8")
+    if "zZ9yY8xX7w" in url:
+        return (CRAIGSLIST_FIXTURE_DIR / "detail.html").read_text(encoding="utf-8")
+    raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+
 def _build_context() -> SearchContext:
     citypack = Citypack.model_validate(
         {
@@ -212,6 +234,52 @@ def _build_context() -> SearchContext:
             "hard": {"exclude": []},
             "weights": {},
             "sources": {"stub": "on"},
+            "notify": [],
+            "schedule": "0 */6 * * *",
+        }
+    )
+    return SearchContext(citypack=citypack, profile=profile)
+
+
+def _build_context_for_craigslist() -> SearchContext:
+    citypack = Citypack.model_validate(
+        {
+            "name": "vancouver",
+            "locale": {
+                "language": "en-CA",
+                "timezone": "America/Vancouver",
+                "currency": "CAD",
+                "area_unit": "sqft",
+            },
+            "areas": [
+                {
+                    "key": "kits_beach",
+                    "label": "Kitsilano",
+                    "keywords": ["kitsilano", "kits beach"],
+                    "bbox": [49.262, -123.190, 49.278, -123.145],
+                }
+            ],
+            "sources": {
+                "craigslist": {
+                    "enabled": True,
+                    "load_bearing": False,
+                    "base_url": "https://vancouver.craigslist.org",
+                    "areas": ["van"],
+                }
+            },
+            "address": {
+                "directional": {"w": "west"},
+                "strip_tokens": ["vancouver"],
+                "region_tokens": ["bc"],
+            },
+        }
+    )
+    profile = Profile.model_validate(
+        {
+            "city": "vancouver",
+            "hard": {"exclude": []},
+            "weights": {},
+            "sources": {"craigslist": "on"},
             "notify": [],
             "schedule": "0 */6 * * *",
         }

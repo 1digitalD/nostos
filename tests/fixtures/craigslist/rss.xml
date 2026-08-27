@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>craigslist housing - apartment / housing for rent in vancouver, BC</title>
+    <link>https://vancouver.craigslist.org/search/van/apa</link>
+    <description>sample craigslist rss fixture</description>
+    <item>
+      <title>Bright 2BR near Kits Beach - $2,950</title>
+      <link>https://vancouver.craigslist.org/van/apa/d/vancouver-bright-2br-near-kits/AbC123xYz9</link>
+      <description><![CDATA[
+        <p>$2,950 / 2br - 850ft2 - Bright two bedroom apartment near Kits beach.</p>
+      ]]></description>
+      <dc:date>Tue, 06 Aug 2024 18:23:40 GMT</dc:date>
+    </item>
+    <item>
+      <title>Older listing should be filtered - $2,500</title>
+      <link>https://vancouver.craigslist.org/van/apa/d/vancouver-older-listing/zZ9yY8xX7w</link>
+      <description><![CDATA[
+        <p>$2,500 / 2br - 700ft2 - Older listing for cutoff testing.</p>
+      ]]></description>
+      <pubDate>Mon, 05 Aug 2024 10:10:10 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
