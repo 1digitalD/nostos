@@ -1,3 +1,5 @@
+"""Normalization helpers."""
+
 from nostos.normalize.address import (
     DEFAULT_ADDRESS_TOKENS,
     AddressNormalizationTokens,
@@ -7,13 +9,17 @@ from nostos.normalize.address import (
     normalize_address,
     sig_token,
 )
+from nostos.normalize.dedupe import dedupe_and_filter, make_sig, prune_state_seen
 
 __all__ = [
     "AddressNormalizationTokens",
     "DEFAULT_ADDRESS_TOKENS",
-    "addresses_match",
     "address_from_postingbody",
+    "addresses_match",
+    "dedupe_and_filter",
+    "make_sig",
     "match_key",
     "normalize_address",
+    "prune_state_seen",
     "sig_token",
 ]
