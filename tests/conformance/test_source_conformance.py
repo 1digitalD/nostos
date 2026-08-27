@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from nostos.config.citypack import Citypack
@@ -19,11 +20,21 @@ from nostos.model import (
     SourceRecord,
 )
 from nostos.sources.base import Capabilities, Liveness, Source
+from nostos.sources.kijiji import KijijiSource
 
 
 def test_stub_source_passes_source_conformance_suite() -> None:
     context = _build_context()
     source = StubSource(name="stub")
+    assert_source_conforms(source=source, context=context)
+
+
+def test_kijiji_source_passes_conformance_with_jsonld_discovery() -> None:
+    fixture_dir = Path(__file__).resolve().parent.parent / "fixtures" / "kijiji"
+    search_html = (fixture_dir / "search_vancouver_kitsilano.html").read_text(encoding="utf-8")
+    detail_html = (fixture_dir / "detail_1234567890.html").read_text(encoding="utf-8")
+    source = KijijiSource(fetcher=ConformanceFixtureFetcher(search_html, detail_html))
+    context = _build_context_for_kijiji()
     assert_source_conforms(source=source, context=context)
 
 
@@ -201,6 +212,70 @@ def _build_context() -> SearchContext:
             "hard": {"exclude": []},
             "weights": {},
             "sources": {"stub": "on"},
+            "notify": [],
+            "schedule": "0 */6 * * *",
+        }
+    )
+    return SearchContext(citypack=citypack, profile=profile)
+
+
+class ConformanceFixtureFetcher:
+    def __init__(self, search_html: str, detail_html: str) -> None:
+        self._search_html = search_html
+        self._detail_html = detail_html
+
+    def __call__(self, url: str) -> str:
+        if "/b-apartments-condos/" in url:
+            return self._search_html
+        if "/v-apartments-condos/" in url:
+            return self._detail_html
+        raise AssertionError(f"Unexpected URL {url!r}")
+
+
+def _build_context_for_kijiji() -> SearchContext:
+    citypack = Citypack.model_validate(
+        {
+            "name": "vancouver",
+            "locale": {
+                "language": "en-CA",
+                "timezone": "America/Vancouver",
+                "currency": "CAD",
+                "area_unit": "sqft",
+            },
+            "areas": [
+                {
+                    "key": "kits_beach",
+                    "label": "Kitsilano",
+                    "keywords": ["kitsilano", "kits"],
+                    "bbox": [49.262, -123.190, 49.278, -123.145],
+                }
+            ],
+            "sources": {
+                "kijiji": {
+                    "enabled": True,
+                    "load_bearing": False,
+                    "regions": [
+                        {
+                            "path": "vancouver",
+                            "id": "c37l1700287",
+                            "keywords": ["kitsilano"],
+                        }
+                    ],
+                }
+            },
+            "address": {
+                "directional": {"w": "west"},
+                "strip_tokens": ["vancouver"],
+                "region_tokens": ["bc"],
+            },
+        }
+    )
+    profile = Profile.model_validate(
+        {
+            "city": "vancouver",
+            "hard": {"exclude": []},
+            "weights": {},
+            "sources": {"kijiji": "on"},
             "notify": [],
             "schedule": "0 */6 * * *",
         }
