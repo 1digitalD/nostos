@@ -67,7 +67,10 @@ def _render_section(items: list[RuleContribution], *, direction: str) -> list[st
 def _render_neutral(items: list[RuleContribution]) -> list[str]:
     rendered: list[str] = []
     for item in items:
-        reason = "the rule did not fire" if item.signal is None or not item.signal.fired else "signal was weak"
+        if item.signal is None or not item.signal.fired:
+            reason = "the rule did not fire"
+        else:
+            reason = "signal was weak"
         rendered.append(f"- {item.label} had no effect ({reason}).")
     return rendered
 

@@ -57,10 +57,15 @@ class RankEngine:
 
             signal = registered_rule.detector(listing, context)
             min_for_rule, max_for_rule = _possible_range(weight)
+            shaped = (
+                0.0
+                if signal is None
+                else registered_rule.shaped_magnitude(signal.magnitude)
+            )
             contribution, shaped_magnitude, confidence_factor = _compute_contribution(
                 weight=weight,
                 signal=signal,
-                shaped_magnitude=0.0 if signal is None else registered_rule.shaped_magnitude(signal.magnitude),
+                shaped_magnitude=shaped,
             )
 
             min_possible += min_for_rule
