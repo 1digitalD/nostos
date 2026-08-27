@@ -1,8 +1,8 @@
 from nostos.normalize.address import (
-    AddressNormalizationTokens,
     DEFAULT_ADDRESS_TOKENS,
-    addresses_match,
+    AddressNormalizationTokens,
     address_from_postingbody,
+    addresses_match,
     match_key,
     normalize_address,
     sig_token,

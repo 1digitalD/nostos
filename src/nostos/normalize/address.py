@@ -8,9 +8,9 @@ citypack can inject local geography.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
 
 DEFAULT_DIRECTIONAL_ABBREVIATIONS: Mapping[str, str] = MappingProxyType(
     {
@@ -150,9 +150,11 @@ def _strip_context_tokens(
             j -= 1
             continue
 
-        if tok in city_directional_prefixes and j + 1 < len(tokens) and tokens[j + 1] in {
-            *city_province_postal_tokens
-        }:
+        if (
+            tok in city_directional_prefixes
+            and j + 1 < len(tokens)
+            and tokens[j + 1] in city_province_postal_tokens
+        ):
             deferred = (j, tok)
             j -= 1
             continue
@@ -184,7 +186,11 @@ def _strip_context_tokens(
     return head + kept_tail
 
 
-def match_key(address: str | None, *, tokens: AddressNormalizationTokens = DEFAULT_ADDRESS_TOKENS) -> str:
+def match_key(
+    address: str | None,
+    *,
+    tokens: AddressNormalizationTokens = DEFAULT_ADDRESS_TOKENS,
+) -> str:
     """Lowercase + trim + drop trailing street-type token for forgiving match."""
     if not address:
         return ""
@@ -201,7 +207,11 @@ def match_key(address: str | None, *, tokens: AddressNormalizationTokens = DEFAU
     return " ".join(normalized_tokens)
 
 
-def sig_token(address: str | None, *, tokens: AddressNormalizationTokens = DEFAULT_ADDRESS_TOKENS) -> str:
+def sig_token(
+    address: str | None,
+    *,
+    tokens: AddressNormalizationTokens = DEFAULT_ADDRESS_TOKENS,
+) -> str:
     """Street-signature token for cross-source dedupe."""
     if not address:
         return ""
@@ -275,7 +285,10 @@ def address_from_postingbody(
             return candidate
 
     street_type_pattern = "|".join(re.escape(token) for token in sorted(tokens.street_type_tokens))
-    implicit_re = re.compile(rf"^\s*\d[\w\s#\-]*\b(?:{street_type_pattern})\b.*$", flags=re.IGNORECASE)
+    implicit_re = re.compile(
+        rf"^\s*\d[\w\s#\-]*\b(?:{street_type_pattern})\b.*$",
+        flags=re.IGNORECASE,
+    )
     for line in posting_body.splitlines():
         candidate = line.strip()
         if not candidate:
