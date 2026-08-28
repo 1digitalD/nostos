@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from nostos.config.citypack import load_citypack
 from nostos.config.profile import Profile, load_profile
 
 
@@ -54,3 +55,11 @@ def test_repo_balanced_profile_example_loads() -> None:
     assert balanced.weights
     assert example.city == "vancouver"
     assert example.area_key_weights
+
+
+def test_example_profile_area_keys_are_present_in_citypack() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
+    example = load_profile(repo_root / "profiles" / "example-vancouver.yaml")
+
+    assert set(example.area_key_weights).issubset(citypack.area_keys)

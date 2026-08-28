@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,4 +45,21 @@ class SearchContext:
 def load_search_context(*, citypack_path: str | Path, profile_path: str | Path) -> SearchContext:
     citypack = load_citypack(citypack_path)
     profile = load_profile(profile_path)
-    return SearchContext(citypack=citypack, profile=profile)
+    context = SearchContext(citypack=citypack, profile=profile)
+    _warn_on_unknown_area_key_weights(context)
+    return context
+
+
+def _warn_on_unknown_area_key_weights(context: SearchContext) -> None:
+    missing_keys = sorted(
+        key for key in context.profile.area_key_weights if not context.has_area(key)
+    )
+    if not missing_keys:
+        return
+    joined = ", ".join(missing_keys)
+    warnings.warn(
+        "profile.area_key_weights contains key(s) not present in citypack area vocabulary: "
+        f"{joined}",
+        UserWarning,
+        stacklevel=2,
+    )

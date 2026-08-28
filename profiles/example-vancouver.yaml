@@ -32,9 +32,13 @@ weights:
     cap: 15
 area_key_weights:
   downtown_van: 15
-  kits_beach: 12
-  mount_pleasant: 9
-  burnaby_brentwood: -6
+  burnaby_brentwood: 11
+  kits_beach: 8
+  mount_pleasant: 7
+  downtown_other: 5
+  burnaby_other: 2
+  n_van_lonsdale: 1
+  west_van: 1
 proximity: []
 avoid_areas: []
 confidence:

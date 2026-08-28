@@ -85,8 +85,11 @@ weights:                        # sign and magnitude are yours
   rent.headroom:     { per_100: 1, cap: 15 }
 
 area_key_weights:               # profile-owned neighborhood bonuses/penalties
+  downtown_van:       +15
+  burnaby_brentwood:  +11
   kits_beach:         +8
-  burnaby_brentwood:  -4
+  n_van_lonsdale:     +1
+  west_van:           +1
 
 proximity:                      # [R3]
   - { category: grocery, within_min: 8,  weight: 5 }

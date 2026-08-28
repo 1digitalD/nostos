@@ -7,6 +7,19 @@ import pytest
 
 from nostos.config.citypack import Citypack, load_citypack
 
+REQUIRED_VANCOUVER_AREA_KEYS = frozenset(
+    {
+        "downtown_van",
+        "burnaby_brentwood",
+        "burnaby_other",
+        "kits_beach",
+        "downtown_other",
+        "mount_pleasant",
+        "n_van_lonsdale",
+        "west_van",
+    }
+)
+
 
 def _write_yaml(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -135,3 +148,12 @@ def test_repo_vancouver_example_loads() -> None:
 
     assert loaded.name == "vancouver"
     assert loaded.area_keys
+    assert REQUIRED_VANCOUVER_AREA_KEYS.issubset(loaded.area_keys)
+
+
+def test_packaged_citypack_matches_repo_citypack_area_keys() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    repo_citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
+    packaged_citypack = load_citypack(repo_root / "src" / "nostos" / "citypacks" / "vancouver.yaml")
+
+    assert packaged_citypack.area_keys == repo_citypack.area_keys
