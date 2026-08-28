@@ -66,12 +66,13 @@ class _SourceSnapshot:
     status: str
     records_seen: int
     listings: tuple[_PersistableListing, ...]
+    skipped_records: int
     candidate_watermark: str | None
     error: str | None
 
     @property
     def count(self) -> int:
-        return len(self.listings)
+        return len(self.listings) + self.skipped_records
 
 
 def run_watch(
@@ -239,6 +240,7 @@ def _collect_sources(
                         status=Liveness.FAILED.value,
                         records_seen=0,
                         listings=(),
+                        skipped_records=0,
                         candidate_watermark=None,
                         error=str(exc),
                     )
@@ -256,12 +258,14 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
             status=Liveness.FAILED.value,
             records_seen=0,
             listings=(),
+            skipped_records=0,
             candidate_watermark=None,
             error=str(exc),
         )
 
     status = Liveness.OK.value
     persistable: list[_PersistableListing] = []
+    skipped_records = 0
     max_fetched_at: datetime | None = None
     source_error: str | None = None
     source_scan_state = context.scan_state_for(source.name)
@@ -269,17 +273,19 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
     for record in discovered:
         if max_fetched_at is None or record.fetched_at > max_fetched_at:
             max_fetched_at = record.fetched_at
-        detailed = record
-        if not _should_skip_detail_fetch(
+        if _should_skip_detail_fetch(
             record=record,
             seen_source_ids=source_scan_state.seen_source_ids,
         ):
-            try:
-                detailed = source.fetch_detail(record)
-            except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
-                status = _merge_status(status, Liveness.DEGRADED.value)
-                source_error = str(exc)
-                continue
+            skipped_records += 1
+            continue
+
+        try:
+            detailed = source.fetch_detail(record)
+        except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
+            status = _merge_status(status, Liveness.DEGRADED.value)
+            source_error = str(exc)
+            continue
 
         try:
             liveness = source.check_liveness(detailed).value
@@ -307,6 +313,7 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
         status=status,
         records_seen=len(discovered),
         listings=tuple(persistable),
+        skipped_records=skipped_records,
         candidate_watermark=max_fetched_at.isoformat() if max_fetched_at else None,
         error=source_error,
     )
@@ -548,8 +555,6 @@ def _history_watermark(*, history: Mapping[str, SourceHistory], source_name: str
 
 
 def _should_skip_detail_fetch(*, record: SourceRecord, seen_source_ids: frozenset[str]) -> bool:
-    if record.source != "craigslist":
-        return False
     if record.source_id not in seen_source_ids:
         return False
     payload = record.payload
