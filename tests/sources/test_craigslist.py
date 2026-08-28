@@ -88,6 +88,33 @@ def test_to_listing_is_pure_and_uses_fixture_payloads() -> None:
     assert listing.photos[0].url.endswith(".jpg")
 
 
+def test_to_listing_area_haystack_excludes_description_text() -> None:
+    source = CraigslistSource(fetch_text=_fixture_fetch_text, now=lambda: FIXED_NOW)
+    context = _build_context()
+    record = SourceRecord(
+        source="craigslist",
+        source_id="desc-only-area",
+        url="https://www.craigslist.org/view/d/vancouver-bright-2br/desc-only-area",
+        content_hash="hash-desc-only-area",
+        fetched_at=FIXED_NOW,
+        payload={
+            "id": "desc-only-area",
+            "source": "craigslist",
+            "url": "https://www.craigslist.org/view/d/vancouver-bright-2br/desc-only-area",
+            "posted": "2026-01-02T03:04:05Z",
+            "title": "Bright 2BR apartment",
+            "location": "Vancouver",
+            "address": "123 Main Street Vancouver BC",
+            "description": "Only a few minutes from Kitsilano beach.",
+            "price": 2500,
+        },
+    )
+
+    listing = source.to_listing(record, context)
+
+    assert listing.place.area_key is None
+
+
 @pytest.mark.parametrize("rss_mode", ["403", "blocked_html"])
 def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
     source = CraigslistSource(fetch_text=_fallback_fixture_fetcher(rss_mode), now=lambda: FIXED_NOW)

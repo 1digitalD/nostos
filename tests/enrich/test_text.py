@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
+from nostos.config.citypack import load_citypack
+from nostos.config.profile import Profile
+from nostos.context import SearchContext
 from nostos.enrich.chain import run_enricher_chain
 from nostos.enrich.text import TextRuleEnricher, recover_missing_attributes
 from nostos.model.identity import Identity
@@ -101,9 +105,28 @@ def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood() -> No
 
     updates = recover_missing_attributes(
         listing,
-        context={"area_keywords": {"kits_beach": ["kitsilano", "kits point"]}},
+        context={
+            "area_keywords": {
+                "kits_beach": ["kitsilano", "kits point"],
+                "downtown_van": ["yaletown", "downtown"],
+            }
+        },
         observed_at=OBSERVED_AT,
     )
+
+    assert "attributes.area_key" not in updates
+
+
+def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood_with_shipped_citypack() -> None:
+    listing = make_listing(
+        description="Beautiful apartment just minutes from Yaletown and downtown nightlife.",
+    )
+    repo_root = Path(__file__).resolve().parents[2]
+    citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
+    profile = Profile.model_validate({"city": "vancouver", "weights": {}, "schedule": "0 */6 * * *"})
+    context = SearchContext(citypack=citypack, profile=profile)
+
+    updates = recover_missing_attributes(listing, context=context, observed_at=OBSERVED_AT)
 
     assert "attributes.area_key" not in updates
 

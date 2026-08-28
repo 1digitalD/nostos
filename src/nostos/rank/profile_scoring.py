@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from urllib.parse import unquote, urlparse
 
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
@@ -152,10 +153,24 @@ def _listing_text_blob(listing: Listing) -> str:
     parts: list[str] = []
     if listing.place.raw_address:
         parts.append(listing.place.raw_address)
+    url_slug = _normalized_url_slug(listing.identity.url)
+    if url_slug:
+        parts.append(url_slug)
     for attribute in listing.attributes.values():
         if isinstance(attribute, Observed) and isinstance(attribute.value, str):
             parts.append(attribute.value)
     return " ".join(parts)
+
+
+def _normalized_url_slug(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if not parsed.path:
+        return ""
+    decoded_path = unquote(parsed.path)
+    normalized = decoded_path.replace("/", " ").replace("-", " ").replace("_", " ")
+    return " ".join(normalized.split())
 
 
 def rent_display(listing: Listing) -> str:

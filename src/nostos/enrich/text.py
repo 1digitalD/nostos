@@ -305,10 +305,8 @@ def recover_missing_attributes(
                 )
 
     if listing.place.area_key is None and _attribute_is_fillable(listing, "area_key"):
-        nb_text = " ".join(
-            text_parts[key] for key in _NB_TEXT_PART_KEYS if key in text_parts
-        ).strip()
-        area_match = _area_key_from_text(nb_text, context)
+        nb_text = neighborhood_haystack(*(text_parts.get(key) for key in _NB_TEXT_PART_KEYS))
+        area_match = match_area_key_from_neighborhood_text(nb_text, context)
         if area_match is not None:
             area_key, evidence = area_match
             updates["attributes.area_key"] = _observed(
@@ -399,6 +397,29 @@ def basement_unit_evidence(text: str) -> str | None:
             continue
         return basement_match.group(0).strip()
     return None
+
+
+def neighborhood_haystack(*parts: str | None) -> str:
+    normalized_parts: list[str] = []
+    for part in parts:
+        if part is None:
+            continue
+        normalized = part.strip()
+        if normalized:
+            normalized_parts.append(normalized)
+    return " ".join(normalized_parts)
+
+
+def match_area_key_from_neighborhood_text(text: str, context: object) -> tuple[str, str] | None:
+    return _area_key_from_text(text, context)
+
+
+def infer_area_key_from_neighborhood_text(text: str, context: object) -> str | None:
+    matched = match_area_key_from_neighborhood_text(text, context)
+    if matched is None:
+        return None
+    area_key, _evidence = matched
+    return area_key
 
 
 def _extract_text_parts(listing: Listing) -> dict[str, str]:

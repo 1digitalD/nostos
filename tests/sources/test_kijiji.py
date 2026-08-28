@@ -9,7 +9,8 @@ from typing import Any
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
-from nostos.model import Area, Listing, Observed
+from nostos.model import Area, Listing, Observed, SourceRecord
+from nostos.rank.profile_scoring import passes_hard_filters
 from nostos.sources.base import Liveness
 from nostos.sources.kijiji import KijijiSource
 
@@ -98,6 +99,100 @@ def test_to_listing_is_pure_and_structured() -> None:
     assert listing.furnishing.value == "furnished"
 
 
+def test_to_listing_does_not_infer_area_key_from_description_only() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+    context = _build_context()
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684283",
+        url="https://www.kijiji.ca/v-apartments-condos/vancouver/spacious-2-bedroom-suite/1742684283",
+        content_hash="hash-description-only",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Spacious 2-bedroom suite in Fraserview",
+            "description": "Beautiful apartment just minutes from Yaletown nightlife.",
+            "address": "2200 East 54th Avenue Vancouver BC",
+            "price": 2450,
+        },
+    )
+
+    listing = source.to_listing(record, context)
+
+    assert listing.place.area_key is None
+
+
+def test_to_listing_infers_area_key_from_title_or_address() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+    context = _build_context()
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684284",
+        url="https://www.kijiji.ca/v-apartments-condos/vancouver/yaletown-2-bedroom-rental/1742684284",
+        content_hash="hash-title-address",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Yaletown 2-bedroom rental",
+            "description": "Quiet unit with in-suite laundry.",
+            "address": "1000 Homer Street Vancouver BC",
+            "price": 3200,
+        },
+    )
+
+    listing = source.to_listing(record, context)
+
+    assert listing.place.area_key == "downtown_van"
+
+
+def test_to_listing_basement_suite_title_fails_hard_filter_when_excluded() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+    context = _build_context(exclude=["basement"])
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684285",
+        url=(
+            "https://www.kijiji.ca/v-apartments-condos/vancouver/"
+            "spacious-2-bedroom-basement-suite-in-fraserview/1742684285"
+        ),
+        content_hash="hash-basement-suite",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Spacious 2-bedroom basement suite in Fraserview",
+            "description": "Private entrance and in-suite laundry.",
+            "address": "2200 East 54th Avenue Vancouver BC",
+            "price": 2450,
+        },
+    )
+
+    listing = source.to_listing(record, context)
+
+    assert passes_hard_filters(listing, context.profile) is False
+
+
+def test_to_listing_basement_storage_text_passes_hard_filter_when_excluded() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+    context = _build_context(exclude=["basement"])
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684286",
+        url=(
+            "https://www.kijiji.ca/v-apartments-condos/vancouver/"
+            "main-floor-rental-with-basement-storage/1742684286"
+        ),
+        content_hash="hash-basement-storage",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Main floor 2-bedroom rental",
+            "description": "Includes basement storage locker and one underground parking stall.",
+            "address": "123 Main Street Vancouver BC",
+            "price": 2450,
+        },
+    )
+
+    listing = source.to_listing(record, context)
+
+    assert passes_hard_filters(listing, context.profile) is True
+
+
 class FixtureFetcher:
     def __init__(self) -> None:
         self.urls: list[str] = []
@@ -121,7 +216,7 @@ def _fixed_now() -> datetime:
     return datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
-def _build_context() -> SearchContext:
+def _build_context(*, exclude: list[str] | None = None) -> SearchContext:
     citypack = Citypack.model_validate(
         {
             "name": "vancouver",
@@ -139,9 +234,9 @@ def _build_context() -> SearchContext:
                     "bbox": [49.262, -123.190, 49.278, -123.145],
                 },
                 {
-                    "key": "downtown",
+                    "key": "downtown_van",
                     "label": "Downtown",
-                    "keywords": ["downtown"],
+                    "keywords": ["downtown", "yaletown"],
                     "bbox": [49.275, -123.130, 49.290, -123.105],
                 },
             ],
@@ -168,7 +263,7 @@ def _build_context() -> SearchContext:
     profile = Profile.model_validate(
         {
             "city": "vancouver",
-            "hard": {"exclude": []},
+            "hard": {"exclude": exclude or []},
             "weights": {},
             "sources": {"kijiji": "on"},
             "notify": [],
