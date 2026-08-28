@@ -13,6 +13,7 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
+from nostos.enrich.text import infer_area_key_from_neighborhood_text, neighborhood_haystack
 from nostos.model import (
     Absence,
     Area,
@@ -102,6 +103,7 @@ class KijijiSource:
         payload = _mapping_payload(rec.payload)
         observed_at = rec.fetched_at
         title = _as_text(payload.get("title")) or ""
+        description = _as_text(payload.get("description"))
         address = _as_text(payload.get("address"))
         price = _as_int(payload.get("price"))
         area_key = _infer_area_key(payload, ctx)
@@ -115,6 +117,34 @@ class KijijiSource:
             },
             context={"area_vocabulary": ctx.area_vocabulary},
         )
+        attributes: dict[str, Observed[str] | Absence] = {}
+        if title:
+            attributes["title"] = Observed[str](
+                value=title,
+                origin=Origin.SOURCE_FIELD,
+                confidence=1.0,
+                evidence="kijiji title",
+                observed_at=observed_at,
+            )
+        if description:
+            attributes["description"] = Observed[str](
+                value=description,
+                origin=Origin.SOURCE_FIELD,
+                confidence=1.0,
+                evidence="kijiji description",
+                observed_at=observed_at,
+            )
+        structured_location = _as_text(payload.get("structuredLocation")) or _as_text(
+            payload.get("structured_location")
+        )
+        if structured_location:
+            attributes["structuredLocation"] = Observed[str](
+                value=structured_location,
+                origin=Origin.SOURCE_FIELD,
+                confidence=1.0,
+                evidence="kijiji structured location",
+                observed_at=observed_at,
+            )
         photos = _photo_list(payload.get("photos"))
 
         return Listing(
@@ -150,7 +180,7 @@ class KijijiSource:
             parking=_parking_field(payload.get("parking"), observed_at),
             furnishing=_furnishing_field(payload.get("furnishing"), observed_at),
             photos=photos,
-            attributes={},
+            attributes=attributes,
             raw_ref=rec.to_ref(),
             schema_version=1,
         )
@@ -374,22 +404,15 @@ def _photo_list(raw_value: object) -> list[Photo]:
 
 
 def _infer_area_key(payload: Mapping[str, object], ctx: SearchContext) -> str | None:
-    search_blob = " ".join(
-        part.lower()
-        for part in (
-            _as_text(payload.get("address")),
-            _as_text(payload.get("title")),
-            _as_text(payload.get("description")),
-        )
-        if part
+    search_blob = neighborhood_haystack(
+        _as_text(payload.get("address")),
+        _as_text(payload.get("title")),
+        _as_text(payload.get("structuredLocation")),
+        _as_text(payload.get("structured_location")),
     )
     if not search_blob:
         return None
-    for area in ctx.citypack.areas:
-        for keyword in area.keywords:
-            if keyword.lower() in search_blob:
-                return area.key
-    return None
+    return infer_area_key_from_neighborhood_text(search_blob, ctx)
 
 
 def _money_field(
