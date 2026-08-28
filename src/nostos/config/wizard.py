@@ -97,6 +97,16 @@ def build_profile_payload(*, answers: WizardAnswers, citypack: Citypack) -> dict
     if building_laundry_weight != 0:
         weights["laundry.building"] = building_laundry_weight
 
+    if answers.parking is not None:
+        parking_weight = _parking_weight(answers.parking)
+        if parking_weight != 0:
+            weights["parking.available"] = parking_weight
+
+    if answers.pets is not None:
+        pets_weight = _pets_weight(answers.pets)
+        if pets_weight != 0:
+            weights["pets.allowed"] = pets_weight
+
     if answers.min_area is not None:
         weights["area.over_minimum"] = {"per_100_sqft": 4, "cap": 12}
 

@@ -84,6 +84,10 @@ weights:                        # sign and magnitude are yours
   area.over_minimum: { per_100_sqft: 4, cap: 12 }
   rent.headroom:     { per_100: 1, cap: 15 }
 
+area_key_weights:               # profile-owned neighborhood bonuses/penalties
+  kits_beach:         +8
+  burnaby_brentwood:  -4
+
 proximity:                      # [R3]
   - { category: grocery, within_min: 8,  weight: 5 }
   - { category: transit, within_min: 10, weight: 4 }
@@ -109,6 +113,8 @@ schedule: "0 */6 * * *"
   code ships a hardcoded penalty against one named low-income neighbourhood with a
   lat/lng bounding box and postal prefixes. As a personal preference that is ordinary;
   as a product default compiled into everyone's copy it is not.
+- **`area_key_weights` is profile-authored** and keyed by `citypack.areas[].key`. Empty
+  map means no neighbourhood term in ranking.
 - **Shipped profiles**: a neutral `balanced.yaml`, plus `example-vancouver.yaml`
   carrying the original tuned rubric as a worked example of what a real profile looks
   like — without it being anyone's default.

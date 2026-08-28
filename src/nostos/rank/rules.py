@@ -6,7 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from nostos.model import Listing, Observed
+from nostos.config.profile import Profile
+from nostos.model import Absence, Area, Listing, Money, Observed
 
 RuleContext = object
 ShapeFn = Callable[[float], float]
@@ -155,6 +156,33 @@ _SPARSE_PHRASE_RE = re.compile(
     r"quiet\s+neighborhood|family\s+neighborhood|low[\s-]density)\b",
     re.IGNORECASE,
 )
+_PARKING_NEGATIVE_RE = re.compile(
+    r"\b(?:no|without)\s+(?:on[\s-]site\s+)?(?:parking|garage|stall)\b"
+    r"|\bparking\s+(?:is\s+)?(?:not|isn't)\s+(?:included|available)\b"
+    r"|\bno\s+parking\s+available\b",
+    re.IGNORECASE,
+)
+_PARKING_POSITIVE_RE = re.compile(
+    r"\b(?:parking|garage|stall)\s+(?:is\s+)?(?:included|available)\b|"
+    r"\b(?:includes?|comes?\s+with)\s+(?:an?\s+|one\s+)?(?:parking|garage|stall)\b|"
+    r"\b(?:one|1)\s+(?:underground\s+|secured\s+)?parking\s+stall\b",
+    re.IGNORECASE,
+)
+_PET_NO_RE = re.compile(
+    r"\b(no\s+pets?|pet[-\s]?free|sorry\s+no\s+pets?|pets?\s+not\s+allowed|"
+    r"pets?\s+prohibited)\b",
+    re.IGNORECASE,
+)
+_PET_FRIENDLY_RE = re.compile(
+    r"\b(pet[-\s]?friendly|pets?\s+(?:allowed|welcome)|"
+    r"cats?\s+(?:ok|welcome|allowed)|dogs?\s+(?:ok|welcome|allowed))\b",
+    re.IGNORECASE,
+)
+_PET_CONDITIONAL_RE = re.compile(
+    r"\b(pets?\s+considered|case[\s-]by[\s-]case|with\s+approval|"
+    r"landlord\s+approval|pet\s+deposit|pet\s+restrictions)\b",
+    re.IGNORECASE,
+)
 
 _ORDINAL_WORDS = {
     "first": 1,
@@ -266,6 +294,24 @@ def _signal_from_presence(evidence: str, *, confidence: float = 1.0) -> Signal:
     )
 
 
+def _profile_from_context(context: RuleContext) -> Profile | None:
+    profile = getattr(context, "profile", None)
+    if isinstance(profile, Profile):
+        return profile
+    return None
+
+
+def _observed_text_field(field: Observed[str] | Absence) -> tuple[str, float, str | None] | None:
+    if not isinstance(field, Observed):
+        return None
+    if not isinstance(field.value, str):
+        return None
+    normalized = field.value.strip()
+    if not normalized:
+        return None
+    return normalized, field.confidence, field.evidence
+
+
 def _in_suite_laundry_evidence(text: str) -> str | None:
     if not text:
         return None
@@ -346,6 +392,49 @@ def _density_phrase(text: str) -> tuple[str, str] | None:
     return None
 
 
+def _parking_evidence(text: str) -> str | None:
+    if not text:
+        return None
+    if _PARKING_NEGATIVE_RE.search(text):
+        return None
+    match = _PARKING_POSITIVE_RE.search(text)
+    if match is None:
+        return None
+    return match.group(0).strip()
+
+
+def _pet_policy(text: str) -> tuple[str, str] | None:
+    if not text:
+        return None
+    no_match = _PET_NO_RE.search(text)
+    if no_match is not None:
+        return "no_pets", no_match.group(0).strip()
+    friendly_match = _PET_FRIENDLY_RE.search(text)
+    if friendly_match is not None:
+        return "friendly", friendly_match.group(0).strip()
+    conditional_match = _PET_CONDITIONAL_RE.search(text)
+    if conditional_match is not None:
+        return "conditional", conditional_match.group(0).strip()
+    return None
+
+
+def _pet_policy_magnitude(policy: str) -> float | None:
+    normalized = policy.strip().lower()
+    if normalized in {"friendly", "pets_allowed", "allowed", "yes"}:
+        return 1.0
+    if normalized in {"conditional", "considered"}:
+        return 0.5
+    if normalized in {"no_pets", "not_allowed", "prohibited", "no"}:
+        return 0.0
+    return None
+
+
+def _floor_preference_shape(raw_floor: float) -> float:
+    # Preserve detector magnitude (actual floor), but transform it so lower floors score higher.
+    floor_value = max(1.0, raw_floor)
+    return 1.0 / (1.0 + ((floor_value - 1.0) / 3.0))
+
+
 @rule("laundry.in_suite", category="amenities", label="In-suite laundry")
 def _detect_laundry_in_suite(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _bool_attribute(
@@ -386,7 +475,7 @@ def _detect_laundry_building(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(evidence)
 
 
-@rule("floor.low", category="space", label="Lower floor")
+@rule("floor.low", category="space", label="Lower floor", shape=_floor_preference_shape)
 def _detect_floor_low(listing: Listing, _: RuleContext) -> Signal | None:
     floor_field = listing.floor
     if isinstance(floor_field, Observed):
@@ -511,20 +600,139 @@ def _detect_sparse_phrase(listing: Listing, _: RuleContext) -> Signal | None:
 
 
 @rule("parking.available", category="amenities", label="Parking")
-def _stub_parking_available(_: Listing, __: RuleContext) -> Signal:
-    return Signal(fired=False, magnitude=0.0, confidence=1.0, evidence=None)
+def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None:
+    bool_value = _bool_attribute(
+        listing,
+        "attributes.parking_available",
+        "parking_available",
+    )
+    if bool_value is not None:
+        is_available, confidence, evidence = bool_value
+        if is_available:
+            return _signal_from_presence(evidence or "parking available", confidence=confidence)
+        return None
+
+    parking_field = _observed_text_field(listing.parking)
+    if parking_field is not None:
+        parking_text, confidence, evidence = parking_field
+        if _PARKING_NEGATIVE_RE.search(parking_text):
+            return None
+        if (
+            _PARKING_POSITIVE_RE.search(parking_text)
+            or "available" in parking_text.lower()
+            or "included" in parking_text.lower()
+        ):
+            return _signal_from_presence(evidence or parking_text, confidence=confidence)
+        return None
+
+    attr_field = _string_attribute(
+        listing,
+        "attributes.parking",
+        "parking",
+    )
+    if attr_field is not None:
+        parking_text, confidence, evidence = attr_field
+        if _PARKING_NEGATIVE_RE.search(parking_text):
+            return None
+        if (
+            _PARKING_POSITIVE_RE.search(parking_text)
+            or "available" in parking_text.lower()
+            or "included" in parking_text.lower()
+        ):
+            return _signal_from_presence(evidence or parking_text, confidence=confidence)
+        return None
+
+    text = _combined_text(listing)
+    parking_evidence = _parking_evidence(text)
+    if parking_evidence is None:
+        return None
+    return _signal_from_presence(parking_evidence)
 
 
 @rule("pets.allowed", category="amenities", label="Pet friendly")
-def _stub_pets_allowed(_: Listing, __: RuleContext) -> Signal:
-    return Signal(fired=False, magnitude=0.0, confidence=1.0, evidence=None)
+def _detect_pets_allowed(listing: Listing, _: RuleContext) -> Signal | None:
+    policy_attr = _string_attribute(
+        listing,
+        "attributes.pet_policy",
+        "pet_policy",
+    )
+    if policy_attr is not None:
+        policy_value, confidence, evidence = policy_attr
+        magnitude = _pet_policy_magnitude(policy_value)
+        if magnitude is not None:
+            return Signal(
+                fired=True,
+                magnitude=magnitude,
+                confidence=confidence,
+                evidence=evidence or policy_value,
+            )
+
+    bool_attr = _bool_attribute(
+        listing,
+        "attributes.pets_allowed",
+        "pets_allowed",
+    )
+    if bool_attr is not None:
+        pets_allowed, confidence, evidence = bool_attr
+        return Signal(
+            fired=True,
+            magnitude=1.0 if pets_allowed else 0.0,
+            confidence=confidence,
+            evidence=evidence or ("pets allowed" if pets_allowed else "no pets"),
+        )
+
+    text = _combined_text(listing)
+    policy = _pet_policy(text)
+    if policy is None:
+        return None
+    policy_value, evidence = policy
+    magnitude = _pet_policy_magnitude(policy_value)
+    if magnitude is None:
+        return None
+    return Signal(fired=True, magnitude=magnitude, confidence=1.0, evidence=evidence)
 
 
 @rule("area.over_minimum", category="space", label="Space over minimum")
-def _stub_area_over_minimum(_: Listing, __: RuleContext) -> Signal:
-    return Signal(fired=False, magnitude=0.0, confidence=1.0, evidence=None)
+def _detect_area_over_minimum(listing: Listing, context: RuleContext) -> Signal | None:
+    profile = _profile_from_context(context)
+    if profile is None or profile.hard.area is None:
+        return None
+    area_field = listing.area
+    if not isinstance(area_field, Observed):
+        return None
+    if not isinstance(area_field.value, Area):
+        return None
+    if area_field.value.unit.lower() != profile.hard.area.unit.lower():
+        return None
+    over_minimum = area_field.value.value - profile.hard.area.min
+    if over_minimum <= 0:
+        return None
+    return Signal(
+        fired=True,
+        magnitude=float(over_minimum),
+        confidence=area_field.confidence,
+        evidence=area_field.evidence or "area over minimum",
+    )
 
 
 @rule("rent.headroom", category="cost", label="Rent headroom")
-def _stub_rent_headroom(_: Listing, __: RuleContext) -> Signal:
-    return Signal(fired=False, magnitude=0.0, confidence=1.0, evidence=None)
+def _detect_rent_headroom(listing: Listing, context: RuleContext) -> Signal | None:
+    profile = _profile_from_context(context)
+    if profile is None or profile.hard.rent is None:
+        return None
+    rent_field = listing.rent
+    if not isinstance(rent_field, Observed):
+        return None
+    if not isinstance(rent_field.value, Money):
+        return None
+    if rent_field.value.currency.upper() != profile.hard.rent.currency.upper():
+        return None
+    headroom = profile.hard.rent.max - float(rent_field.value.amount)
+    if headroom <= 0:
+        return None
+    return Signal(
+        fired=True,
+        magnitude=headroom,
+        confidence=rent_field.confidence,
+        evidence=rent_field.evidence or "rent headroom",
+    )
