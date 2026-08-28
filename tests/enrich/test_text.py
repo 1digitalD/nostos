@@ -117,13 +117,16 @@ def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood() -> No
     assert "attributes.area_key" not in updates
 
 
-def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood_with_shipped_citypack() -> None:
+def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood_with_shipped_citypack(
+) -> None:
     listing = make_listing(
         description="Beautiful apartment just minutes from Yaletown and downtown nightlife.",
     )
     repo_root = Path(__file__).resolve().parents[2]
     citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
-    profile = Profile.model_validate({"city": "vancouver", "weights": {}, "schedule": "0 */6 * * *"})
+    profile = Profile.model_validate(
+        {"city": "vancouver", "weights": {}, "schedule": "0 */6 * * *"}
+    )
     context = SearchContext(citypack=citypack, profile=profile)
 
     updates = recover_missing_attributes(listing, context=context, observed_at=OBSERVED_AT)
