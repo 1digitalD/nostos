@@ -4,7 +4,7 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
-from nostos.context import SearchContext
+from nostos.context import SearchContext, SourceScanState
 from nostos.enrich.base import Enricher
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import JSONValue, Listing, Observed, SourceRecord
@@ -24,6 +24,7 @@ from nostos.watch.health import (
     HealthPolicy,
     SourceHealthDecision,
     SourceHealthInput,
+    SourceHistory,
     evaluate_sources,
     load_source_histories,
 )
@@ -94,6 +95,19 @@ def run_watch(
 
     source_list = tuple(sources)
     source_metadata = _source_metadata(context=context, sources=source_list)
+    source_names = tuple(source.name for source in source_list)
+    history = load_source_histories(conn, source_names=source_names)
+    seen_source_ids = _load_seen_source_ids(conn=conn, source_names=source_names)
+    context_with_scan_state = replace(
+        context,
+        source_scan_state={
+            source_name: SourceScanState(
+                previous_watermark=_history_watermark(history=history, source_name=source_name),
+                seen_source_ids=frozenset(seen_source_ids.get(source_name, set())),
+            )
+            for source_name in source_names
+        },
+    )
 
     run_repo = RunRepo(conn)
     with conn:
@@ -105,14 +119,12 @@ def run_watch(
         )
 
     snapshots = _collect_sources(
-        context=context,
+        context=context_with_scan_state,
         sources=source_list,
         source_metadata=source_metadata,
         max_workers=max_workers,
     )
 
-    source_names = tuple(snapshot.name for snapshot in snapshots)
-    history = load_source_histories(conn, source_names=source_names)
     health_inputs = tuple(
         SourceHealthInput(
             name=snapshot.name,
@@ -252,16 +264,22 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
     persistable: list[_PersistableListing] = []
     max_fetched_at: datetime | None = None
     source_error: str | None = None
+    source_scan_state = context.scan_state_for(source.name)
 
     for record in discovered:
         if max_fetched_at is None or record.fetched_at > max_fetched_at:
             max_fetched_at = record.fetched_at
-        try:
-            detailed = source.fetch_detail(record)
-        except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
-            status = _merge_status(status, Liveness.DEGRADED.value)
-            source_error = str(exc)
-            continue
+        detailed = record
+        if not _should_skip_detail_fetch(
+            record=record,
+            seen_source_ids=source_scan_state.seen_source_ids,
+        ):
+            try:
+                detailed = source.fetch_detail(record)
+            except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
+                status = _merge_status(status, Liveness.DEGRADED.value)
+                source_error = str(exc)
+                continue
 
         try:
             liveness = source.check_liveness(detailed).value
@@ -500,6 +518,46 @@ def _source_metadata(
     return metadata
 
 
+def _load_seen_source_ids(
+    *,
+    conn: sqlite3.Connection,
+    source_names: tuple[str, ...],
+) -> dict[str, set[str]]:
+    if not source_names:
+        return {}
+    placeholders = ",".join("?" for _ in source_names)
+    rows = conn.execute(
+        f"""
+        SELECT source, source_id
+        FROM listing_source
+        WHERE source IN ({placeholders})
+        """,
+        source_names,
+    ).fetchall()
+    seen_by_source: dict[str, set[str]] = {name: set() for name in source_names}
+    for row in rows:
+        seen_by_source.setdefault(str(row["source"]), set()).add(str(row["source_id"]))
+    return seen_by_source
+
+
+def _history_watermark(*, history: Mapping[str, SourceHistory], source_name: str) -> str | None:
+    source_history = history.get(source_name)
+    if source_history is None:
+        return None
+    return source_history.watermark
+
+
+def _should_skip_detail_fetch(*, record: SourceRecord, seen_source_ids: frozenset[str]) -> bool:
+    if record.source != "craigslist":
+        return False
+    if record.source_id not in seen_source_ids:
+        return False
+    payload = record.payload
+    if not isinstance(payload, Mapping):
+        return False
+    return _coerce_str(payload.get("posted")) == ""
+
+
 def _existing_listing_ids(*, conn: sqlite3.Connection, listing_ids: tuple[str, ...]) -> set[str]:
     if not listing_ids:
         return set()
@@ -596,3 +654,9 @@ def _merge_status(current: str, incoming: str) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def _coerce_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()

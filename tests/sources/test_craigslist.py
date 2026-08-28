@@ -12,7 +12,7 @@ import pytest
 
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
-from nostos.context import SearchContext
+from nostos.context import SearchContext, SourceScanState
 from nostos.model import Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import CraigslistSource, cl_posted_iso, parse_cl_rss
@@ -27,6 +27,18 @@ def test_parse_cl_rss_filters_by_cutoff_and_preserves_base62_case() -> None:
     assert items[0]["source"] == "craigslist"
     assert items[0]["price"] == 2950
     assert items[0]["posted"] == "2024-08-06T18:23:40Z"
+
+
+def test_discover_uses_previous_watermark_for_rss_prefilter() -> None:
+    source = CraigslistSource(fetch_text=_fixture_fetch_text, now=lambda: FIXED_NOW)
+    context = _build_context(
+        source_scan_state={
+            "craigslist": SourceScanState(previous_watermark="2024-08-06T19:00:00Z")
+        }
+    )
+
+    records = list(source.discover(context))
+    assert records == []
 
 
 def test_cl_posted_iso_handles_absolute_relative_and_month_day_labels() -> None:
@@ -89,6 +101,20 @@ def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
     assert first_payload["price"] == 2400
 
 
+def test_discover_blocked_html_falls_back_even_with_previous_watermark() -> None:
+    source = CraigslistSource(
+        fetch_text=_fallback_fixture_fetcher("blocked_html"),
+        now=lambda: FIXED_NOW,
+    )
+    context = _build_context(
+        source_scan_state={
+            "craigslist": SourceScanState(previous_watermark="2024-08-06T19:00:00Z")
+        }
+    )
+    records = list(source.discover(context))
+    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+
+
 def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
     seen_urls: list[str] = []
 
@@ -112,6 +138,7 @@ def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
     first_payload = _record_payload(records[0])
     assert first_payload["title"] == "Bright 2BR near Kits Beach"
     assert first_payload["price"] == 2400
+    assert first_payload["location"] == "Vancouver Westside near UBC"
     assert records[0].url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
 
 
@@ -151,7 +178,9 @@ def _record_payload(record: SourceRecord) -> Mapping[str, Any]:
     return payload
 
 
-def _build_context() -> SearchContext:
+def _build_context(
+    source_scan_state: dict[str, SourceScanState] | None = None,
+) -> SearchContext:
     citypack = Citypack.model_validate(
         {
             "name": "vancouver",
@@ -199,4 +228,8 @@ def _build_context() -> SearchContext:
             "schedule": "0 */6 * * *",
         }
     )
-    return SearchContext(citypack=citypack, profile=profile)
+    return SearchContext(
+        citypack=citypack,
+        profile=profile,
+        source_scan_state=source_scan_state or {},
+    )

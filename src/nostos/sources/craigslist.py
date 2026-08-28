@@ -68,11 +68,17 @@ class CraigslistSource:
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
         base_url, areas = _source_scope(ctx)
         query = _discover_query(ctx)
+        last_scan_iso = ctx.scan_state_for(self.name).previous_watermark or CL_EPOCH
         fetched_at = self._now()
         by_id: dict[str, SourceRecord] = {}
 
         for area in areas:
-            for item in self._discover_area(base_url=base_url, area=area, query=query):
+            for item in self._discover_area(
+                base_url=base_url,
+                area=area,
+                query=query,
+                last_scan_iso=last_scan_iso,
+            ):
                 source_id = _coerce_str(item.get("id"))
                 if not source_id:
                     continue
@@ -88,6 +94,7 @@ class CraigslistSource:
                     "posted": _coerce_str(item.get("posted")),
                     "title": _coerce_str(item.get("title")),
                     "price": _coerce_int(item.get("price")),
+                    "location": _coerce_str(item.get("location")),
                 }
                 by_id[source_id] = SourceRecord(
                     source=self.name,
@@ -107,6 +114,7 @@ class CraigslistSource:
         base_url: str,
         area: str,
         query: Mapping[str, str],
+        last_scan_iso: str,
     ) -> list[dict[str, Any]]:
         rss_url = f"{base_url}/search/{area}/apa?{urlencode(query)}"
         should_fallback_to_html = False
@@ -121,8 +129,10 @@ class CraigslistSource:
             if not should_fallback_to_html:
                 raise
         else:
-            rss_items = parse_cl_rss(rss_text, CL_EPOCH)
-            should_fallback_to_html = len(rss_items) == 0
+            rss_items = parse_cl_rss(rss_text, last_scan_iso)
+            should_fallback_to_html = (not _looks_like_rss_feed(rss_text)) or (
+                len(rss_items) == 0 and last_scan_iso == CL_EPOCH
+            )
 
         if not should_fallback_to_html:
             return rss_items
@@ -131,7 +141,7 @@ class CraigslistSource:
         html_query.pop("format", None)
         html_url = f"{base_url}/search/{area}/apa?{urlencode(html_query)}"
         html_text = self._fetch_text(html_url)
-        return parse_cl_search_html(html_text, CL_EPOCH)
+        return parse_cl_search_html(html_text, last_scan_iso)
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
         fetched_at = self._now()
@@ -407,6 +417,11 @@ def _extract_link(item: ET.Element) -> str:
         if _local_name(child.tag) == "link":
             return (child.text or "").strip()
     return ""
+
+
+def _looks_like_rss_feed(payload: str) -> bool:
+    lowered = payload.lstrip().lower()
+    return lowered.startswith(("<?xml", "<rss", "<rdf:rdf"))
 
 
 def _extract_posted(item: ET.Element) -> str:
