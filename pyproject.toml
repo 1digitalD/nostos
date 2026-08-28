@@ -36,6 +36,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nostos"]
+include = ["src/nostos/citypacks/*.yaml"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -13,10 +13,11 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from nostos.context import SearchContext
-from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.base import Enricher
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import JSONValue, Listing, Observed, SourceRecord
 from nostos.rank.engine import RankEngine, RuleContribution, ScoreResult
+from nostos.rank.profile_scoring import score_listing_for_profile
 from nostos.sources.base import Liveness, Source
 from nostos.store.repo import ListingRepo, ObservationRepo, RunRepo, ScoreRepo
 from nostos.watch.health import (
@@ -78,7 +79,7 @@ def run_watch(
     context: SearchContext,
     sources: Iterable[Source],
     profile_id: str,
-    enrichers: Iterable[Any] | None = None,
+    enrichers: Iterable[Enricher] | None = None,
     rank_engine: RankEngine | None = None,
     notifier: Notifier | None = None,
     run_id: str | None = None,
@@ -141,29 +142,28 @@ def run_watch(
     new_listing_ids = _persist_stage(conn=conn, listings=persistable)
 
     active_enrichers = tuple(enrichers or (TextRuleEnricher(),))
-    enriched = _enrich_stage(
+    engine = rank_engine or RankEngine(context.profile)
+    scored = _score_stage(
         conn=conn,
         context=context,
         listings=persistable,
         enrichers=active_enrichers,
-    )
-    engine = rank_engine or RankEngine(context.profile)
-    scored = _rank_stage(
-        conn=conn,
-        context=context,
-        listings=enriched,
         rank_engine=engine,
         profile_id=profile_id,
     )
 
     active_notifier = notifier or notifier_from_urls(context.profile.notify)
-    alerts = tuple(alert for decision in health_decisions for alert in decision.alerts)
-    _notify(
-        notifier=active_notifier,
-        alerts=alerts,
-        scored=scored,
-        new_listing_ids=new_listing_ids,
-    )
+    alerts_list = [alert for decision in health_decisions for alert in decision.alerts]
+    try:
+        _notify(
+            notifier=active_notifier,
+            alerts=tuple(alerts_list),
+            scored=scored,
+            new_listing_ids=new_listing_ids,
+        )
+    except Exception as exc:  # noqa: BLE001 - notification failures are degraded sinks
+        alerts_list.append(f"notify degraded: {exc}")
+    alerts = tuple(alerts_list)
 
     source_reports = _build_source_reports(
         snapshots=snapshots,
@@ -217,7 +217,20 @@ def _collect_sources(
             for source in sources
         }
         for future in as_completed(futures):
-            snapshots.append(future.result())
+            source = futures[future]
+            try:
+                snapshots.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - isolate source worker failures
+                snapshots.append(
+                    _SourceSnapshot(
+                        name=source.name,
+                        status=Liveness.FAILED.value,
+                        records_seen=0,
+                        listings=(),
+                        candidate_watermark=None,
+                        error=str(exc),
+                    )
+                )
     snapshots.sort(key=lambda item: item.name)
     return tuple(snapshots)
 
@@ -250,7 +263,12 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
             source_error = str(exc)
             continue
 
-        liveness = source.check_liveness(detailed).value
+        try:
+            liveness = source.check_liveness(detailed).value
+        except Exception as exc:  # noqa: BLE001 - isolate per-listing liveness failures
+            status = _merge_status(status, Liveness.DEGRADED.value)
+            source_error = str(exc)
+            continue
         status = _merge_status(status, liveness)
         try:
             listing = source.to_listing(detailed, context)
@@ -316,23 +334,31 @@ def _persist_stage(
     return seen_new_ids
 
 
-def _enrich_stage(
+def _score_stage(
     *,
     conn: sqlite3.Connection,
     context: SearchContext,
     listings: tuple[_PersistableListing, ...],
-    enrichers: tuple[Any, ...],
-) -> tuple[_PersistableListing, ...]:
-    if not listings or not enrichers:
-        return listings
-
+    enrichers: tuple[Enricher, ...],
+    rank_engine: RankEngine,
+    profile_id: str,
+) -> tuple[tuple[_PersistableListing, ScoreResult], ...]:
     listing_repo = ListingRepo(conn)
     observation_repo = ObservationRepo(conn, listing_repo=listing_repo)
-    enriched: list[_PersistableListing] = []
+    score_repo = ScoreRepo(conn)
+    scored: list[tuple[_PersistableListing, ScoreResult]] = []
 
     with conn:
         for item in listings:
-            updated_listing = run_enricher_chain(item.listing, enrichers, context)
+            scored_listing = score_listing_for_profile(
+                item.listing,
+                context=context,
+                enrichers=enrichers,
+                rank_engine=rank_engine,
+            )
+            if scored_listing is None:
+                continue
+            updated_listing = scored_listing.listing
             before = _observed_fields(item.listing)
             after = _observed_fields(updated_listing)
             for field_name, observed in after.items():
@@ -348,38 +374,24 @@ def _enrich_stage(
                     observed_at=observed.observed_at,
                     schema_version=updated_listing.schema_version,
                 )
-            enriched.append(
-                _PersistableListing(
-                    source_name=item.source_name,
-                    record=item.record,
-                    listing=updated_listing,
-                )
-            )
-    return tuple(enriched)
-
-
-def _rank_stage(
-    *,
-    conn: sqlite3.Connection,
-    context: SearchContext,
-    listings: tuple[_PersistableListing, ...],
-    rank_engine: RankEngine,
-    profile_id: str,
-) -> tuple[tuple[_PersistableListing, ScoreResult], ...]:
-    score_repo = ScoreRepo(conn)
-    scored: list[tuple[_PersistableListing, ScoreResult]] = []
-
-    with conn:
-        for item in listings:
-            result = rank_engine.score_listing(item.listing, context=context)
+            result = scored_listing.result
             score_repo.upsert_score(
-                listing_id=item.listing.identity.listing_id,
+                listing_id=updated_listing.identity.listing_id,
                 profile_id=profile_id,
                 score=result.score,
                 breakdown_json=_score_breakdown(result),
                 computed_at=item.record.fetched_at,
             )
-            scored.append((item, result))
+            scored.append(
+                (
+                    _PersistableListing(
+                        source_name=item.source_name,
+                        record=item.record,
+                        listing=updated_listing,
+                    ),
+                    result,
+                )
+            )
     scored.sort(key=lambda pair: pair[1].score, reverse=True)
     return tuple(scored)
 

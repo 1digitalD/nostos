@@ -14,7 +14,7 @@ from typing import Annotated, Any, NamedTuple, NoReturn
 import typer
 
 from nostos.config.citypack import Citypack, load_citypack
-from nostos.config.profile import Profile, ScaledWeight, WeightValue
+from nostos.config.profile import ScaledWeight, WeightValue
 from nostos.config.wizard import (
     PetsPreference,
     PreferenceLevel,
@@ -24,9 +24,16 @@ from nostos.config.wizard import (
     missing_required_values,
 )
 from nostos.context import load_search_context
-from nostos.model import Absence, Listing, Observed, SourceRecord
+from nostos.enrich.text import TextRuleEnricher
+from nostos.model import SourceRecord
 from nostos.rank.engine import NormalizationWindow, RankEngine, RuleContribution, ScoreResult
 from nostos.rank.explain import render_score_explanation
+from nostos.rank.profile_scoring import (
+    listing_title,
+    prepare_listing_for_profile,
+    rent_display,
+    score_listing_for_profile,
+)
 from nostos.rank.rules import Signal
 from nostos.sources import (
     CraigslistSource,
@@ -82,7 +89,7 @@ def init_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to citypacks/vancouver.yaml.",
+            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
         ),
     ] = None,
     force: Annotated[
@@ -114,11 +121,11 @@ def init_command(
     baths_min: Annotated[
         float | None,
         typer.Option("--baths-min", min=0.0, help="Minimum bathrooms."),
-    ] = 1.0,
+    ] = None,
     baths_max: Annotated[
         float | None,
         typer.Option("--baths-max", min=0.0, help="Maximum bathrooms."),
-    ] = 2.0,
+    ] = None,
     min_area: Annotated[
         float | None,
         typer.Option("--min-area", min=0.0, help="Minimum floor area."),
@@ -222,7 +229,6 @@ def init_command(
         max_rent=selected_max_rent,
         beds=selected_beds,
         laundry=selected_laundry,
-        pets=selected_pets,
     )
     if missing and not interactive:
         missing_list = ", ".join(missing)
@@ -276,9 +282,11 @@ def init_command(
                 default="",
             )
             selected_notify = _split_csv(notify_text)
-    else:
-        if selected_parking is None:
-            selected_parking = PreferenceLevel.NICE_TO_HAVE
+    if selected_city != loaded_citypack.name:
+        _fail(
+            "profile.city must match citypack.name "
+            f"(got profile.city={selected_city!r}, citypack.name={loaded_citypack.name!r})"
+        )
 
     validated_sources = _validated_source_list(
         selected=selected_sources,
@@ -290,8 +298,6 @@ def init_command(
     assert selected_max_rent is not None
     assert selected_beds is not None
     assert selected_laundry is not None
-    assert selected_parking is not None
-    assert selected_pets is not None
 
     answers = WizardAnswers(
         city=selected_city,
@@ -310,10 +316,13 @@ def init_command(
         schedule=schedule,
     )
     payload = build_profile_payload(answers=answers, citypack=loaded_citypack)
-    Profile.model_validate(payload)
 
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(dump_profile_yaml(payload), encoding="utf-8")
+    try:
+        load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    except ValueError as exc:
+        _fail(str(exc))
 
     typer.echo(f"profile_path={profile_path}")
     typer.echo(f"profile_id={_profile_id(profile_path)}")
@@ -337,7 +346,7 @@ def watch_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to citypacks/vancouver.yaml.",
+            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
         ),
     ] = None,
     source: Annotated[
@@ -348,7 +357,10 @@ def watch_command(
         bool,
         typer.Option(
             "--dry-run",
-            help="Run against an in-memory DB and suppress notifications.",
+            help=(
+                "Dry run: no persist, no notify; still scrapes enabled sources "
+                "against an in-memory DB."
+            ),
         ),
     ] = False,
     yes: Annotated[
@@ -437,7 +449,7 @@ def rank_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to citypacks/vancouver.yaml.",
+            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
         ),
     ] = None,
 ) -> None:
@@ -459,6 +471,7 @@ def rank_command(
     context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
     profile_id = _profile_id(profile_path)
     rank_engine = RankEngine(context.profile)
+    enrichers = (TextRuleEnricher(),)
     source_objects = {item.name: item for item in _instantiate_sources(source_names=None)}
 
     scored_rows: list[tuple[str, float]] = []
@@ -473,17 +486,23 @@ def rank_command(
                 if source_obj is None:
                     continue
                 listing = source_obj.to_listing(record_row.record, context)
-                if not _passes_hard_filters(listing, context.profile):
+                scored_listing = score_listing_for_profile(
+                    listing,
+                    context=context,
+                    enrichers=enrichers,
+                    rank_engine=rank_engine,
+                )
+                if scored_listing is None:
                     continue
-                result = rank_engine.score_listing(listing, context=context)
+                result = scored_listing.result
                 score_repo.upsert_score(
-                    listing_id=listing.identity.listing_id,
+                    listing_id=scored_listing.listing.identity.listing_id,
                     profile_id=profile_id,
                     score=result.score,
                     breakdown_json=_score_result_to_json(result),
                     computed_at=record_row.record.fetched_at,
                 )
-                scored_rows.append((listing.identity.listing_id, result.score))
+                scored_rows.append((scored_listing.listing.identity.listing_id, result.score))
 
     scored_rows.sort(key=lambda item: item[1], reverse=True)
     typer.echo(f"profile_path={profile_path}")
@@ -507,6 +526,13 @@ def list_command(
         Path | None,
         typer.Option("--db", help="SQLite DB path. Defaults to XDG data location."),
     ] = None,
+    citypack: Annotated[
+        Path | None,
+        typer.Option(
+            "--citypack",
+            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+        ),
+    ] = None,
     limit: Annotated[
         int,
         typer.Option("--limit", min=1, help="Maximum number of ranked listings."),
@@ -522,10 +548,15 @@ def list_command(
 
     profile_path = _resolve_profile_path(profile)
     db_path = _resolve_db_path(db)
+    citypack_path = _resolve_citypack_path(citypack)
     _require_file(profile_path, "--profile")
     _require_file(db_path, "--db")
+    _require_file(citypack_path, "--citypack")
 
     profile_id = _profile_id(profile_path)
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    source_objects = {item.name: item for item in _instantiate_sources(source_names=None)}
+    enrichers = (TextRuleEnricher(),)
     with connect(db_path) as conn:
         rows = conn.execute(
             """
@@ -537,15 +568,39 @@ def list_command(
             """,
             (profile_id, limit),
         ).fetchall()
+        listing_ids = tuple(str(row["listing_id"]) for row in rows)
+        latest_records = _latest_source_records_by_listing_ids(conn, listing_ids=listing_ids)
 
     typer.echo(f"profile_path={profile_path}")
     typer.echo(f"db_path={db_path}")
+    typer.echo(f"citypack_path={citypack_path}")
     typer.echo(f"profile_id={profile_id}")
-    typer.echo(f"listed_count={len(rows)}")
+    rendered = 0
     for row in rows:
         listing_id = str(row["listing_id"])
+        record_row = latest_records.get(listing_id)
+        if record_row is None:
+            continue
+        source_obj = source_objects.get(record_row.record.source)
+        if source_obj is None:
+            continue
+        listing = source_obj.to_listing(record_row.record, context)
+        prepared = prepare_listing_for_profile(
+            listing,
+            context=context,
+            enrichers=enrichers,
+        )
+        if prepared is None:
+            continue
         score_value = float(row["score"])
-        typer.echo(f"listing_id={listing_id}\tscore={score_value:.3f}")
+        title = _tab_safe(listing_title(prepared))
+        url = _tab_safe(prepared.identity.url)
+        rent = _tab_safe(rent_display(prepared))
+        typer.echo(
+            f"listing_id={listing_id}\tscore={score_value:.3f}\ttitle={title}\turl={url}\trent={rent}"
+        )
+        rendered += 1
+    typer.echo(f"listed_count={rendered}")
 
 
 @app.command("explain")
@@ -682,9 +737,11 @@ def _resolve_citypack_path(path: Path | None) -> Path:
 
 
 def _default_citypack_candidates() -> list[Path]:
+    package_citypack = Path(__file__).resolve().parent / "citypacks" / DEFAULT_CITYPACK_FILE
     package_root = Path(__file__).resolve().parents[2]
     return [
         Path.cwd() / "citypacks" / DEFAULT_CITYPACK_FILE,
+        package_citypack,
         package_root / "citypacks" / DEFAULT_CITYPACK_FILE,
     ]
 
@@ -815,103 +872,56 @@ def _latest_source_records(conn: sqlite3.Connection) -> tuple[_SourceRecordRow, 
     return tuple(records)
 
 
-def _passes_hard_filters(listing: Listing, profile: Profile) -> bool:
-    hard = profile.hard
-    if hard.rent is not None:
-        rent_value = _money_amount(listing)
-        if rent_value is None or rent_value > hard.rent.max:
-            return False
+def _latest_source_records_by_listing_ids(
+    conn: sqlite3.Connection, *, listing_ids: tuple[str, ...]
+) -> dict[str, _SourceRecordRow]:
+    if not listing_ids:
+        return {}
+    placeholders = ",".join("?" for _ in listing_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            sr.listing_id AS listing_id,
+            sr.source AS source,
+            sr.source_id AS source_id,
+            sr.url AS url,
+            sr.payload AS payload,
+            sr.content_hash AS content_hash,
+            sr.fetched_at AS fetched_at
+        FROM source_record sr
+        INNER JOIN (
+            SELECT listing_id, MAX(id) AS latest_id
+            FROM source_record
+            WHERE listing_id IN ({placeholders})
+            GROUP BY listing_id
+        ) latest
+        ON latest.latest_id = sr.id
+        ORDER BY sr.listing_id ASC
+        """,
+        listing_ids,
+    ).fetchall()
 
-    if hard.beds is not None:
-        beds_value = _observed_float(listing.beds)
-        if beds_value is None or not _matches_numeric_filter(
-            beds_value,
-            eq=hard.beds.eq,
-            minimum=hard.beds.min,
-            maximum=hard.beds.max,
-        ):
-            return False
-
-    if hard.baths is not None:
-        baths_value = _observed_float(listing.baths)
-        if baths_value is None or not _matches_numeric_filter(
-            baths_value,
-            eq=hard.baths.eq,
-            minimum=hard.baths.min,
-            maximum=hard.baths.max,
-        ):
-            return False
-
-    if hard.area is not None:
-        area_value = _observed_area(listing)
-        if area_value is None:
-            return False
-        if hard.area.unit.lower() != area_value.unit.lower():
-            return False
-        if area_value.value < hard.area.min:
-            return False
-
-    excludes = {token.strip().lower() for token in hard.exclude}
-    haystack = _listing_text_blob(listing).lower()
-    if "basement" in excludes and "basement" in haystack:
-        return False
-    if "furnished_only" in excludes and _is_furnished(listing):
-        return False
-    return True
-
-
-def _matches_numeric_filter(
-    value: float,
-    *,
-    eq: float | None,
-    minimum: float | None,
-    maximum: float | None,
-) -> bool:
-    if eq is not None:
-        return value == eq
-    if minimum is not None and value < minimum:
-        return False
-    if maximum is not None and value > maximum:
-        return False
-    return True
+    records: dict[str, _SourceRecordRow] = {}
+    for row in rows:
+        payload = json.loads(str(row["payload"]))
+        if not isinstance(payload, Mapping):
+            continue
+        fetched_at = datetime.fromisoformat(str(row["fetched_at"]))
+        source_record = SourceRecord(
+            source=str(row["source"]),
+            source_id=str(row["source_id"]),
+            url=str(row["url"]),
+            payload=dict(payload),
+            content_hash=str(row["content_hash"]),
+            fetched_at=fetched_at,
+        )
+        listing_id = str(row["listing_id"])
+        records[listing_id] = _SourceRecordRow(listing_id=listing_id, record=source_record)
+    return records
 
 
-def _money_amount(listing: Listing) -> float | None:
-    field = listing.rent
-    if isinstance(field, Observed):
-        return float(field.value.amount)
-    return None
-
-
-def _observed_float(field: Observed[float] | Absence) -> float | None:
-    if isinstance(field, Observed):
-        return float(field.value)
-    return None
-
-
-def _observed_area(listing: Listing) -> Any | None:
-    field = listing.area
-    if isinstance(field, Observed):
-        return field.value
-    return None
-
-
-def _is_furnished(listing: Listing) -> bool:
-    field = listing.furnishing
-    if not isinstance(field, Observed):
-        return False
-    value = field.value.strip().lower()
-    return "furnished" in value and "unfurnished" not in value
-
-
-def _listing_text_blob(listing: Listing) -> str:
-    parts: list[str] = []
-    if listing.place.raw_address:
-        parts.append(listing.place.raw_address)
-    for attribute in listing.attributes.values():
-        if isinstance(attribute, Observed) and isinstance(attribute.value, str):
-            parts.append(attribute.value)
-    return " ".join(parts)
+def _tab_safe(value: str) -> str:
+    return value.replace("\t", " ").replace("\n", " ")
 
 
 def _score_result_to_json(result: ScoreResult) -> dict[str, Any]:
