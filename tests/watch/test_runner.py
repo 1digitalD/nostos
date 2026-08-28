@@ -15,6 +15,7 @@ from nostos.config.profile import Profile
 from nostos.context import SearchContext
 from nostos.model import Absence, Identity, Listing, Money, Observed, Origin, Place, SourceRecord
 from nostos.sources.base import Capabilities, Liveness
+from nostos.sources.craigslist import CraigslistSource
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import RunRepo
 from nostos.watch.runner import run_watch
@@ -488,6 +489,54 @@ def test_watermark_advances_when_within_band_and_candidate_is_newer(tmp_path: Pa
         assert source_counts["watermark"]["effective"] == new_watermark
 
 
+def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_craigslist_context()
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
+    search_html = (fixture_dir / "search_results.html").read_text(encoding="utf-8")
+    blocked_rss_html = (fixture_dir / "rss_blocked.html").read_text(encoding="utf-8")
+    detail_html = (fixture_dir / "detail.html").read_text(encoding="utf-8")
+    detailed_urls: list[str] = []
+
+    def fetch_text(url: str) -> str:
+        if "format=rss" in url:
+            return blocked_rss_html
+        if "/search/van/apa?" in url:
+            return search_html
+        if "/view/d/" in url:
+            detailed_urls.append(url)
+            return detail_html
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(
+        fetch_text=fetch_text,
+        now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-craigslist-first",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        assert len(detailed_urls) == 2
+
+        second_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-craigslist-second",
+            now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
+        )
+        assert len(detailed_urls) == 2
+        assert second_report.source_reports["craigslist"].count == 2
+
+
 class ScriptedSource:
     def __init__(
         self,
@@ -647,6 +696,57 @@ def _build_context(
             "hard": {"exclude": []},
             "weights": {},
             "sources": profile_sources,
+            "notify": [],
+            "schedule": "0 */6 * * *",
+        }
+    )
+    return SearchContext(citypack=citypack, profile=profile)
+
+
+def _build_craigslist_context() -> SearchContext:
+    citypack = Citypack.model_validate(
+        {
+            "name": "vancouver",
+            "locale": {
+                "language": "en-CA",
+                "timezone": "America/Vancouver",
+                "currency": "CAD",
+                "area_unit": "sqft",
+            },
+            "areas": [
+                {
+                    "key": "kits_beach",
+                    "label": "Kitsilano",
+                    "keywords": ["kits beach", "kitsilano"],
+                    "bbox": [49.262, -123.190, 49.278, -123.145],
+                }
+            ],
+            "sources": {
+                "craigslist": {
+                    "enabled": True,
+                    "load_bearing": True,
+                    "base_url": "https://vancouver.craigslist.org",
+                    "areas": ["van"],
+                }
+            },
+            "address": {
+                "directional": {"w": "west"},
+                "strip_tokens": ["vancouver"],
+                "region_tokens": ["bc"],
+            },
+        }
+    )
+    profile = Profile.model_validate(
+        {
+            "city": "vancouver",
+            "hard": {
+                "rent": {"max": 3600, "currency": "CAD"},
+                "beds": {"eq": 2},
+                "area": {"min": 700, "unit": "sqft"},
+                "exclude": [],
+            },
+            "weights": {},
+            "sources": {"craigslist": "on"},
             "notify": [],
             "schedule": "0 */6 * * *",
         }
