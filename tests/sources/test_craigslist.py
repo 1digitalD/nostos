@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
+import httpx
+import pytest
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
@@ -70,6 +73,41 @@ def test_to_listing_is_pure_and_uses_fixture_payloads() -> None:
     assert listing.photos[0].url.endswith(".jpg")
 
 
+@pytest.mark.parametrize("rss_mode", ["403", "blocked_html"])
+def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
+    source = CraigslistSource(fetch_text=_fallback_fixture_fetcher(rss_mode), now=lambda: FIXED_NOW)
+    records = list(source.discover(_build_context()))
+
+    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+    first = records[0]
+    assert first.url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
+    assert first.payload["title"] == "Bright 2BR near Kits Beach"
+    assert first.payload["price"] == 2400
+
+
+def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
+    seen_urls: list[str] = []
+
+    def fetch_text(url: str) -> str:
+        seen_urls.append(url)
+        if "format=rss" in url:
+            return _fixture("rss_blocked.html")
+        if "/search/van/apa?" in url:
+            return _fixture("search_results.html")
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(fetch_text=fetch_text, now=lambda: FIXED_NOW)
+    records = list(source.discover(_build_context()))
+
+    assert records
+    html_search_url = next(url for url in seen_urls if "format=rss" not in url and "/search/van/apa?" in url)
+    assert "format" not in parse_qs(urlparse(html_search_url).query)
+    assert records[0].source_id == "AbC123xYz9"
+    assert records[0].payload["title"] == "Bright 2BR near Kits Beach"
+    assert records[0].payload["price"] == 2400
+    assert records[0].url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
+
+
 def _fixture(name: str) -> str:
     return (FIXTURE_DIR / name).read_text(encoding="utf-8")
 
@@ -82,6 +120,21 @@ def _fixture_fetch_text(url: str) -> str:
     if "zZ9yY8xX7w" in url:
         return _fixture("detail.html")
     raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+
+def _fallback_fixture_fetcher(rss_mode: str):
+    def fetch_text(url: str) -> str:
+        if "format=rss" in url:
+            if rss_mode == "blocked_html":
+                return _fixture("rss_blocked.html")
+            request = httpx.Request("GET", url)
+            response = httpx.Response(status_code=403, request=request, text="blocked")
+            raise httpx.HTTPStatusError("403 blocked", request=request, response=response)
+        if "/search/van/apa?" in url:
+            return _fixture("search_results.html")
+        raise AssertionError(f"unexpected craigslist fallback fixture URL: {url}")
+
+    return fetch_text
 
 
 def _build_context() -> SearchContext:

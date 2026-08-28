@@ -34,7 +34,11 @@ CL_BASE_DEFAULT = "https://vancouver.craigslist.org"
 CL_AREAS_DEFAULT: tuple[str, ...] = ("van", "nvn", "bby")
 CL_EPOCH = "1970-01-01T00:00:00Z"
 CL_ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
-CL_USER_AGENT = "Mozilla/5.0 (compatible; nostos/0.1; +https://github.com/1digitalD/nostos)"
+CL_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/127.0.0.0 Safari/537.36"
+)
 _ID_RE = re.compile(r"/([A-Za-z0-9]+)(?:[?#].*)?$")
 _PRICE_RE = re.compile(r"\$([\d,]+)")
 _BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*br\b", re.IGNORECASE)
@@ -68,9 +72,7 @@ class CraigslistSource:
         by_id: dict[str, SourceRecord] = {}
 
         for area in areas:
-            rss_url = f"{base_url}/search/{area}/apa?{urlencode(query)}"
-            rss_text = self._fetch_text(rss_url)
-            for item in parse_cl_rss(rss_text, CL_EPOCH):
+            for item in self._discover_area(base_url=base_url, area=area, query=query):
                 source_id = _coerce_str(item.get("id"))
                 if not source_id:
                     continue
@@ -98,6 +100,36 @@ class CraigslistSource:
 
         ordered = sorted(by_id.values(), key=lambda rec: rec.source_id)
         return iter(ordered)
+
+    def _discover_area(
+        self,
+        *,
+        base_url: str,
+        area: str,
+        query: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        rss_url = f"{base_url}/search/{area}/apa?{urlencode(query)}"
+        should_fallback_to_html = False
+        rss_items: list[dict[str, Any]] = []
+
+        try:
+            rss_text = self._fetch_text(rss_url)
+        except httpx.HTTPStatusError as exc:
+            should_fallback_to_html = bool(exc.response is not None and exc.response.status_code == 403)
+            if not should_fallback_to_html:
+                raise
+        else:
+            rss_items = parse_cl_rss(rss_text, CL_EPOCH)
+            should_fallback_to_html = len(rss_items) == 0
+
+        if not should_fallback_to_html:
+            return rss_items
+
+        html_query = dict(query)
+        html_query.pop("format", None)
+        html_url = f"{base_url}/search/{area}/apa?{urlencode(html_query)}"
+        html_text = self._fetch_text(html_url)
+        return parse_cl_search_html(html_text, CL_EPOCH)
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
         fetched_at = self._now()
@@ -280,6 +312,46 @@ def parse_cl_rss(rss: str, last_scan_iso: str) -> list[dict[str, Any]]:
                 "posted": posted,
                 "title": title,
                 "price": price,
+            }
+        )
+
+    return items
+
+
+def parse_cl_search_html(html: str, last_scan_iso: str) -> list[dict[str, Any]]:
+    del last_scan_iso
+    node = HTMLParser(html)
+    items: list[dict[str, Any]] = []
+
+    for search_result in node.css("li.cl-static-search-result"):
+        listing_link = search_result.css_first("a[href]")
+        if listing_link is None:
+            continue
+        href_value = listing_link.attributes.get("href")
+        if not isinstance(href_value, str):
+            continue
+        listing_url = href_value.strip()
+        if not listing_url:
+            continue
+
+        match = _ID_RE.search(listing_url)
+        if not match:
+            continue
+
+        title = _node_text(search_result.css_first(".title"))
+        if not title:
+            title_attr = search_result.attributes.get("title")
+            title = title_attr.strip() if isinstance(title_attr, str) else ""
+
+        items.append(
+            {
+                "id": match.group(1),
+                "source": CL_SOURCE_NAME,
+                "url": listing_url,
+                "posted": "",
+                "title": title,
+                "price": _extract_price(_node_text(search_result.css_first(".price"))),
+                "location": _node_text(search_result.css_first(".location")),
             }
         )
 
