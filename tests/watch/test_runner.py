@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -495,7 +497,10 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
     fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
     search_html = (fixture_dir / "search_results.html").read_text(encoding="utf-8")
     blocked_rss_html = (fixture_dir / "rss_blocked.html").read_text(encoding="utf-8")
-    detail_html = (fixture_dir / "detail.html").read_text(encoding="utf-8")
+    detail_html = _detail_html_with_price(
+        (fixture_dir / "detail.html").read_text(encoding="utf-8"),
+        "$2,950",
+    )
     detailed_urls: list[str] = []
 
     def fetch_text(url: str) -> str:
@@ -524,6 +529,21 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
             now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
         assert len(detailed_urls) == 2
+        first_signature = _listing_source_signature(
+            conn,
+            source="craigslist",
+            source_id="AbC123xYz9",
+        )
+        assert _projected_rent_amount(conn, listing_id="craigslist:AbC123xYz9") == Decimal("2950")
+        assert (
+            _count_observations(
+                conn,
+                listing_id="craigslist:AbC123xYz9",
+                field="rent",
+                origin=Origin.SOURCE_FIELD.value,
+            )
+            == 1
+        )
 
         second_report = run_watch(
             conn=conn,
@@ -535,6 +555,148 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
         )
         assert len(detailed_urls) == 2
         assert second_report.source_reports["craigslist"].count == 2
+        assert _projected_rent_amount(conn, listing_id="craigslist:AbC123xYz9") == Decimal("2950")
+        assert (
+            _count_observations(
+                conn,
+                listing_id="craigslist:AbC123xYz9",
+                field="rent",
+                origin=Origin.SOURCE_FIELD.value,
+            )
+            == 1
+        )
+        assert (
+            _count_source_records(
+                conn,
+                source="craigslist",
+                source_id="AbC123xYz9",
+            )
+            == 1
+        )
+        assert (
+            _listing_source_signature(conn, source="craigslist", source_id="AbC123xYz9")
+            == first_signature
+        )
+
+
+def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_craigslist_context()
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
+    search_html = (fixture_dir / "search_results.html").read_text(encoding="utf-8")
+    search_html_run2 = search_html.replace(
+        "</ul>",
+        """
+      <li class="cl-static-search-result" title="New 2BR only on run 2">
+        <a href="https://www.craigslist.org/view/d/vancouver-new-2br/NewRun2xY1">
+          <div class="title">New 2BR only on run 2</div>
+          <div class="details">
+            <div class="price">$2,600</div>
+            <div class="location">Vancouver Downtown</div>
+          </div>
+        </a>
+      </li>
+    </ul>
+        """,
+    )
+    blocked_rss_html = (fixture_dir / "rss_blocked.html").read_text(encoding="utf-8")
+    detail_html = _detail_html_with_price(
+        (fixture_dir / "detail.html").read_text(encoding="utf-8"),
+        "$2,950",
+    )
+    detail_html_new_listing = _detail_html_with_price(
+        (fixture_dir / "detail.html").read_text(encoding="utf-8"),
+        "$3,100",
+    )
+    detailed_urls: list[str] = []
+    search_requests = 0
+
+    def fetch_text(url: str) -> str:
+        nonlocal search_requests
+        if "format=rss" in url:
+            return blocked_rss_html
+        if "/search/van/apa?" in url:
+            search_requests += 1
+            return search_html if search_requests == 1 else search_html_run2
+        if "/view/d/" in url:
+            detailed_urls.append(url)
+            if url.endswith("/NewRun2xY1"):
+                return detail_html_new_listing
+            return detail_html
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(
+        fetch_text=fetch_text,
+        now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-craigslist-first",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        assert len(detailed_urls) == 2
+
+        second_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-craigslist-second",
+            now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
+        )
+        assert len(detailed_urls) == 3
+        assert detailed_urls[-1].endswith("/NewRun2xY1")
+        assert second_report.source_reports["craigslist"].count == 3
+        assert _projected_rent_amount(conn, listing_id="craigslist:NewRun2xY1") == Decimal("3100")
+        assert _count_source_records(conn, source="craigslist", source_id="NewRun2xY1") == 1
+
+
+def test_seen_ids_with_posted_timestamp_still_fetch_detail(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    source_name = "scripted"
+    context = _build_context(
+        source_flags={
+            source_name: {"enabled": True, "load_bearing": False},
+        }
+    )
+    source = ScriptedSource(
+        name=source_name,
+        records=(
+            _make_record(
+                source_name,
+                1,
+                minutes=1,
+                posted="2026-01-02T00:01:00Z",
+            ),
+        ),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-scripted-first",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-scripted-second",
+            now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
+        )
+
+        assert source.fetch_detail_calls == 2
 
 
 class ScriptedSource:
@@ -556,6 +718,7 @@ class ScriptedSource:
         self._records = records
         self._discover_error = discover_error
         self._check_liveness_error = check_liveness_error
+        self.fetch_detail_calls = 0
 
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
         del ctx
@@ -564,6 +727,7 @@ class ScriptedSource:
         yield from self._records
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
+        self.fetch_detail_calls += 1
         return rec
 
     def check_liveness(self, rec: SourceRecord) -> Liveness:
@@ -634,22 +798,26 @@ def _make_record(
     *,
     minutes: int,
     fetched_at: datetime | None = None,
+    posted: str | None = None,
 ) -> SourceRecord:
     timestamp = fetched_at or datetime(2026, 1, 2, 0, minutes, 0, tzinfo=UTC)
+    payload: dict[str, Any] = {
+        "title": f"{source} listing {suffix}",
+        "address": f"{suffix} Example St",
+        "rent": 2000 + suffix,
+        "beds": 1,
+        "baths": 1,
+        "liveness": "ok",
+    }
+    if posted is not None:
+        payload["posted"] = posted
     return SourceRecord(
         source=source,
         source_id=f"{source}-{suffix}",
         url=f"https://example.test/{source}/{suffix}",
         content_hash=f"{source}-{suffix}",
         fetched_at=timestamp,
-        payload={
-            "title": f"{source} listing {suffix}",
-            "address": f"{suffix} Example St",
-            "rent": 2000 + suffix,
-            "beds": 1,
-            "baths": 1,
-            "liveness": "ok",
-        },
+        payload=payload,
     )
 
 
@@ -768,6 +936,90 @@ def _source_counts(counts_json: dict[str, Any], source_name: str) -> dict[str, A
     if not isinstance(payload, dict):
         raise AssertionError(f"run.counts_json.sources.{source_name} is missing or malformed")
     return payload
+
+
+def _detail_html_with_price(html: str, price: str) -> str:
+    return html.replace("</body>", f'<span class="price">{price}</span></body>')
+
+
+def _projected_rent_amount(conn: sqlite3.Connection, *, listing_id: str) -> Decimal:
+    row = conn.execute(
+        "SELECT fields_json FROM listing WHERE id = ?",
+        (listing_id,),
+    ).fetchone()
+    if row is None:
+        raise AssertionError(f"missing listing row for {listing_id}")
+    fields_json = json.loads(str(row["fields_json"]))
+    if not isinstance(fields_json, dict):
+        raise AssertionError("listing.fields_json must be a JSON object")
+    rent_payload = fields_json.get("rent")
+    if not isinstance(rent_payload, dict):
+        raise AssertionError("listing.fields_json.rent must be present and be a JSON object")
+    value_payload = rent_payload.get("value")
+    if not isinstance(value_payload, dict):
+        raise AssertionError("listing.fields_json.rent.value must be a JSON object")
+    amount = value_payload.get("amount")
+    if not isinstance(amount, str):
+        raise AssertionError("listing.fields_json.rent.value.amount must be a string")
+    return Decimal(amount)
+
+
+def _count_observations(
+    conn: sqlite3.Connection,
+    *,
+    listing_id: str,
+    field: str,
+    origin: str | None = None,
+) -> int:
+    if origin is None:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM observation
+            WHERE listing_id = ? AND field = ?
+            """,
+            (listing_id, field),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM observation
+            WHERE listing_id = ? AND field = ? AND origin = ?
+            """,
+            (listing_id, field, origin),
+        ).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def _count_source_records(conn: sqlite3.Connection, *, source: str, source_id: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM source_record
+        WHERE source = ? AND source_id = ?
+        """,
+        (source, source_id),
+    ).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])
+
+
+def _listing_source_signature(conn: sqlite3.Connection, *, source: str, source_id: str) -> str:
+    row = conn.execute(
+        """
+        SELECT signature
+        FROM listing_source
+        WHERE source = ? AND source_id = ?
+        """,
+        (source, source_id),
+    ).fetchone()
+    if row is None:
+        raise AssertionError(f"missing listing_source row for {source}:{source_id}")
+    return str(row["signature"])
 
 
 @dataclass(frozen=True)
