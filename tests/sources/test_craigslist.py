@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
-from nostos.model import Area, Money, Observed
+from nostos.model import Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import CraigslistSource, cl_posted_iso, parse_cl_rss
 
@@ -80,9 +83,10 @@ def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
 
     assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
     first = records[0]
+    first_payload = _record_payload(first)
     assert first.url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
-    assert first.payload["title"] == "Bright 2BR near Kits Beach"
-    assert first.payload["price"] == 2400
+    assert first_payload["title"] == "Bright 2BR near Kits Beach"
+    assert first_payload["price"] == 2400
 
 
 def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
@@ -100,11 +104,14 @@ def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
     records = list(source.discover(_build_context()))
 
     assert records
-    html_search_url = next(url for url in seen_urls if "format=rss" not in url and "/search/van/apa?" in url)
+    html_search_url = next(
+        url for url in seen_urls if "format=rss" not in url and "/search/van/apa?" in url
+    )
     assert "format" not in parse_qs(urlparse(html_search_url).query)
     assert records[0].source_id == "AbC123xYz9"
-    assert records[0].payload["title"] == "Bright 2BR near Kits Beach"
-    assert records[0].payload["price"] == 2400
+    first_payload = _record_payload(records[0])
+    assert first_payload["title"] == "Bright 2BR near Kits Beach"
+    assert first_payload["price"] == 2400
     assert records[0].url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
 
 
@@ -122,7 +129,7 @@ def _fixture_fetch_text(url: str) -> str:
     raise AssertionError(f"unexpected craigslist fixture URL: {url}")
 
 
-def _fallback_fixture_fetcher(rss_mode: str):
+def _fallback_fixture_fetcher(rss_mode: str) -> Callable[[str], str]:
     def fetch_text(url: str) -> str:
         if "format=rss" in url:
             if rss_mode == "blocked_html":
@@ -135,6 +142,13 @@ def _fallback_fixture_fetcher(rss_mode: str):
         raise AssertionError(f"unexpected craigslist fallback fixture URL: {url}")
 
     return fetch_text
+
+
+def _record_payload(record: SourceRecord) -> Mapping[str, Any]:
+    payload = record.payload
+    if not isinstance(payload, Mapping):
+        raise AssertionError("expected craigslist test payload to be a mapping")
+    return payload
 
 
 def _build_context() -> SearchContext:

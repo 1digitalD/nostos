@@ -115,7 +115,9 @@ class CraigslistSource:
         try:
             rss_text = self._fetch_text(rss_url)
         except httpx.HTTPStatusError as exc:
-            should_fallback_to_html = bool(exc.response is not None and exc.response.status_code == 403)
+            should_fallback_to_html = bool(
+                exc.response is not None and exc.response.status_code == 403
+            )
             if not should_fallback_to_html:
                 raise
         else:
