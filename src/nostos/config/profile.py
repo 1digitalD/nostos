@@ -134,6 +134,7 @@ class Profile(BaseModel):
     city: NonEmptyStr
     hard: HardFilters = Field(default_factory=HardFilters)
     weights: dict[NonEmptyStr, WeightValue] = Field(default_factory=dict)
+    area_key_weights: dict[NonEmptyStr, float] = Field(default_factory=dict)
     proximity: list[ProximityPreference] = Field(default_factory=list)
     avoid_areas: list[AvoidAreaPreference] = Field(default_factory=list)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)

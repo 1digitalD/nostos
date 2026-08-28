@@ -1,0 +1,46 @@
+city: vancouver
+hard:
+  rent:
+    max: 3600
+    currency: CAD
+  beds:
+    eq: 2
+  baths:
+    min: 1
+    max: 2
+  area:
+    min: 750
+    unit: sqft
+  exclude:
+    - basement
+    - furnished_only
+weights:
+  laundry.in_suite: 10
+  laundry.building: -6
+  parking.available: 8
+  pets.allowed: -10
+  floor.low: 6
+  walk.score: 4
+  space.den_or_solarium: 3
+  density.walkable: 2
+  density.sparse: -2
+  area.over_minimum:
+    per_100_sqft: 4
+    cap: 12
+  rent.headroom:
+    per_100: 1
+    cap: 15
+area_key_weights:
+  downtown_van: 15
+  kits_beach: 12
+  mount_pleasant: 9
+  burnaby_brentwood: -6
+proximity: []
+avoid_areas: []
+confidence:
+  unverified_penalty: 0
+sources:
+  craigslist: on
+  kijiji: on
+notify: []
+schedule: "0 */6 * * *"

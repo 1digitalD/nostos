@@ -564,9 +564,8 @@ def list_command(
             FROM score
             WHERE profile_id = ?
             ORDER BY score DESC, listing_id ASC
-            LIMIT ?
             """,
-            (profile_id, limit),
+            (profile_id,),
         ).fetchall()
         listing_ids = tuple(str(row["listing_id"]) for row in rows)
         latest_records = _latest_source_records_by_listing_ids(conn, listing_ids=listing_ids)
@@ -577,6 +576,8 @@ def list_command(
     typer.echo(f"profile_id={profile_id}")
     rendered = 0
     for row in rows:
+        if rendered >= limit:
+            break
         listing_id = str(row["listing_id"])
         record_row = latest_records.get(listing_id)
         if record_row is None:

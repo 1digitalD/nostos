@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from nostos.config.profile import Profile, ScaledWeight, WeightValue
-from nostos.model import Listing
+from nostos.model import Listing, Observed
 from nostos.rank.rules import DEFAULT_REGISTRY, RuleRegistry, Signal
 
 
@@ -86,6 +86,13 @@ class RankEngine:
                 )
             )
 
+        location_term = _location_area_key_contribution(profile=self._profile, listing=listing)
+        if location_term is not None:
+            min_possible += location_term.min_possible
+            max_possible += location_term.max_possible
+            total += location_term.contribution
+            contributions.append(location_term)
+
         normalization = NormalizationWindow(min_possible=min_possible, max_possible=max_possible)
         score = _normalize(total=total, window=normalization)
 
@@ -123,6 +130,77 @@ def _compute_contribution(
 
     intensity = _clamp(shaped_magnitude, minimum=0.0, maximum=1.0)
     return weight * intensity * confidence_factor, intensity, confidence_factor
+
+
+def _location_area_key_contribution(
+    *, profile: Profile, listing: Listing
+) -> RuleContribution | None:
+    if not profile.area_key_weights:
+        return None
+
+    area_key = _listing_area_key(listing)
+    configured_weights = profile.area_key_weights
+    min_possible = min(0.0, *configured_weights.values())
+    max_possible = max(0.0, *configured_weights.values())
+
+    if area_key is None:
+        return RuleContribution(
+            rule_key="location.area_key",
+            category="proximity",
+            label="Area preference",
+            weight=0.0,
+            signal=None,
+            shaped_magnitude=0.0,
+            confidence_factor=0.0,
+            min_possible=min_possible,
+            max_possible=max_possible,
+            contribution=0.0,
+        )
+
+    matched_weight = configured_weights.get(area_key, 0.0)
+    if matched_weight == 0:
+        return RuleContribution(
+            rule_key="location.area_key",
+            category="proximity",
+            label="Area preference",
+            weight=0.0,
+            signal=None,
+            shaped_magnitude=0.0,
+            confidence_factor=0.0,
+            min_possible=min_possible,
+            max_possible=max_possible,
+            contribution=0.0,
+        )
+
+    return RuleContribution(
+        rule_key="location.area_key",
+        category="proximity",
+        label="Area preference",
+        weight=matched_weight,
+        signal=Signal(
+            fired=True,
+            magnitude=1.0,
+            confidence=1.0,
+            evidence=area_key,
+        ),
+        shaped_magnitude=1.0,
+        confidence_factor=1.0,
+        min_possible=min_possible,
+        max_possible=max_possible,
+        contribution=matched_weight,
+    )
+
+
+def _listing_area_key(listing: Listing) -> str | None:
+    if listing.place.area_key is not None and listing.place.area_key.strip():
+        return listing.place.area_key.strip()
+
+    area_key_attr = listing.attributes.get("area_key")
+    if isinstance(area_key_attr, Observed) and isinstance(area_key_attr.value, str):
+        normalized = area_key_attr.value.strip()
+        if normalized:
+            return normalized
+    return None
 
 
 def _possible_range(weight: WeightValue) -> tuple[float, float]:

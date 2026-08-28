@@ -78,7 +78,9 @@ def test_init_non_interactive_writes_profile_and_refuses_to_clobber(tmp_path: Pa
     assert isinstance(laundry_weight, float)
     assert laundry_weight > 0
     assert "parking.available" not in profile.weights
-    assert "pets.allowed" not in profile.weights
+    pets_weight = profile.weights["pets.allowed"]
+    assert isinstance(pets_weight, float)
+    assert pets_weight < 0
     assert "rent.headroom" not in profile.weights
     load_search_context(citypack_path=citypack_path, profile_path=profile_path)
 
@@ -172,6 +174,47 @@ def test_init_force_overwrites_existing_profile(tmp_path: Path) -> None:
     updated_profile = load_profile(profile_path)
     assert updated_profile.hard.rent is not None
     assert updated_profile.hard.rent.max == pytest.approx(3100)
+
+
+def test_init_writes_parking_and_pets_weights_when_selected(tmp_path: Path) -> None:
+    citypack_path = _write_citypack(tmp_path / "citypack.yaml", source_name="stub")
+    profile_path = tmp_path / "profile.yaml"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "init",
+            "--non-interactive",
+            "--citypack",
+            str(citypack_path),
+            "--profile",
+            str(profile_path),
+            "--city",
+            "vancouver",
+            "--max-rent",
+            "3200",
+            "--beds",
+            "2",
+            "--laundry",
+            "nice-to-have",
+            "--parking",
+            "nice-to-have",
+            "--pets",
+            "prefer",
+            "--source",
+            "stub",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    profile = load_profile(profile_path)
+
+    parking_weight = profile.weights["parking.available"]
+    pets_weight = profile.weights["pets.allowed"]
+    assert isinstance(parking_weight, float)
+    assert isinstance(pets_weight, float)
+    assert parking_weight > 0
+    assert pets_weight > 0
 
 
 def test_init_fails_when_city_does_not_match_citypack_name(tmp_path: Path) -> None:
@@ -586,6 +629,115 @@ def test_list_excludes_real_basement_but_keeps_basement_storage_phrase(
     assert "stub:basement-storage" in listed_ids
 
 
+def test_list_applies_limit_after_current_profile_filters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[SourceRecord] = []
+    for idx in range(10):
+        records.append(
+            _record(
+                f"fail-{idx:02d}",
+                in_suite_laundry=True,
+                beds=1.0,
+            )
+        )
+    for idx in range(25):
+        records.append(
+            _record(
+                f"pass-{idx:02d}",
+                in_suite_laundry=False,
+                beds=2.0,
+            )
+        )
+
+    monkeypatch.setattr(
+        cli_module,
+        "SOURCE_FACTORIES",
+        {"stub": lambda: StubSource(records=tuple(records))},
+    )
+
+    citypack_path = _write_citypack(tmp_path / "citypack.yaml", source_name="stub")
+    profile_path = tmp_path / "profile.yaml"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "city": "vancouver",
+                "hard": {"rent": {"max": 4000, "currency": "CAD"}, "exclude": []},
+                "weights": {"laundry.in_suite": 10},
+                "proximity": [],
+                "avoid_areas": [],
+                "confidence": {"unverified_penalty": 0},
+                "sources": {"stub": "on"},
+                "notify": [],
+                "schedule": "0 */6 * * *",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "nostos.db"
+    runner = CliRunner()
+
+    watch_result = runner.invoke(
+        cli_module.app,
+        [
+            "watch",
+            "--citypack",
+            str(citypack_path),
+            "--profile",
+            str(profile_path),
+            "--db",
+            str(db_path),
+            "--source",
+            "stub",
+            "--yes",
+        ],
+    )
+    assert watch_result.exit_code == 0, watch_result.output
+
+    profile_path.write_text(
+        json.dumps(
+            {
+                "city": "vancouver",
+                "hard": {
+                    "rent": {"max": 4000, "currency": "CAD"},
+                    "beds": {"eq": 2},
+                    "exclude": [],
+                },
+                "weights": {"laundry.in_suite": 10},
+                "proximity": [],
+                "avoid_areas": [],
+                "confidence": {"unverified_penalty": 0},
+                "sources": {"stub": "on"},
+                "notify": [],
+                "schedule": "0 */6 * * *",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    list_result = runner.invoke(
+        cli_module.app,
+        [
+            "list",
+            "--citypack",
+            str(citypack_path),
+            "--profile",
+            str(profile_path),
+            "--db",
+            str(db_path),
+            "--limit",
+            "20",
+        ],
+    )
+    assert list_result.exit_code == 0, list_result.output
+    listed_ids = _parse_listing_ids(list_result.stdout)
+    assert len(listed_ids) == 20
+    assert all(listing_id.startswith("stub:pass-") for listing_id in listed_ids)
+    assert "listed_count=20" in list_result.stdout
+
+
 def test_wizard_written_profiles_flip_order_for_laundry_preference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -743,6 +895,7 @@ def _record(
     source_id: str,
     *,
     in_suite_laundry: bool,
+    beds: float = 2.0,
     title: str | None = None,
     description: str | None = None,
     address: str | None = None,
@@ -767,7 +920,7 @@ def _record(
             "description": listing_description,
             "address": address or f"{source_id} Example Street",
             "rent": 2500,
-            "beds": 2.0,
+            "beds": beds,
             "baths": 1.0,
             "in_suite_laundry": in_suite_laundry,
         },

@@ -24,6 +24,7 @@ def test_profile_loads_and_normalizes_source_switches(tmp_path: Path) -> None:
                 "exclude": ["basement"],
             },
             "weights": {"laundry.in_suite": 6, "pets.allowed": 8},
+            "area_key_weights": {"kits_beach": 5, "burnaby_brentwood": -3},
             "sources": {"craigslist": "on", "kijiji": "off"},
             "notify": ["ntfy://nostos/demo"],
             "schedule": "0 */6 * * *",
@@ -36,15 +37,20 @@ def test_profile_loads_and_normalizes_source_switches(tmp_path: Path) -> None:
     assert loaded.city == "vancouver"
     assert loaded.hard.rent is not None
     assert loaded.hard.rent.currency == "CAD"
+    assert loaded.area_key_weights["kits_beach"] == 5
     assert loaded.sources["craigslist"] is True
     assert loaded.sources["kijiji"] is False
 
 
 def test_repo_balanced_profile_example_loads() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    profile_path = repo_root / "profiles" / "balanced.yaml"
+    balanced_path = repo_root / "profiles" / "balanced.yaml"
+    example_path = repo_root / "profiles" / "example-vancouver.yaml"
 
-    loaded = load_profile(profile_path)
+    balanced = load_profile(balanced_path)
+    example = load_profile(example_path)
 
-    assert loaded.city == "vancouver"
-    assert loaded.weights
+    assert balanced.city == "vancouver"
+    assert balanced.weights
+    assert example.city == "vancouver"
+    assert example.area_key_weights
