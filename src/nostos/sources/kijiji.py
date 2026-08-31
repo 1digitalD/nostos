@@ -9,7 +9,6 @@ from decimal import Decimal
 from typing import cast
 
 import extruct
-import httpx
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
@@ -27,6 +26,7 @@ from nostos.model import (
     SourceRecord,
 )
 from nostos.sources.base import Capabilities, Liveness
+from nostos.sources.http import RobotsDisallowedError, build_fetch_text
 
 FetchText = Callable[[str], str]
 NowProvider = Callable[[], datetime]
@@ -55,13 +55,21 @@ class KijijiSource:
         fetcher: FetchText | None = None,
         now_provider: NowProvider | None = None,
     ) -> None:
-        self._fetcher = fetcher or _http_get
+        self._fetcher = fetcher or build_fetch_text(
+            self.capabilities,
+            user_agent=_REQUEST_HEADERS["User-Agent"],
+            headers=_REQUEST_HEADERS,
+            timeout=20.0,
+        )
         self._now_provider = now_provider or _utc_now
 
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
         discovered: dict[str, SourceRecord] = {}
         for search_url in _discover_urls(ctx):
-            html = self._fetcher(search_url)
+            try:
+                html = self._fetcher(search_url)
+            except RobotsDisallowedError:
+                continue
             fetched_at = self._now_provider()
             item_list = _extract_item_list(html=html, base_url=search_url)
             for record in _records_from_item_list(
@@ -74,6 +82,8 @@ class KijijiSource:
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
         try:
             html = self._fetcher(rec.url)
+        except RobotsDisallowedError:
+            return rec
         except Exception:
             return rec
 
@@ -568,12 +578,6 @@ def _content_hash(source_id: str, url: str, payload: Mapping[str, object]) -> st
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _http_get(url: str) -> str:
-    response = httpx.get(url, follow_redirects=True, timeout=20.0, headers=_REQUEST_HEADERS)
-    response.raise_for_status()
-    return response.text
 
 
 def _utc_now() -> datetime:
