@@ -90,6 +90,17 @@ class CraigslistSource:
             timeout=30.0,
         )
         self._now = now or _utc_now
+        self._prefiltered_record_count = 0
+
+    def prefiltered_record_count(self) -> int:
+        """RSS items dropped by the watermark prefilter on the last `discover()` call.
+
+        These are listings still live on craigslist that simply predate the watermark
+        (nothing new to report), as distinct from a source that returned nothing at
+        all. The watch runner folds this into the reported count so a quiet run does
+        not read the same as an outage.
+        """
+        return self._prefiltered_record_count
 
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
         base_url, areas = _source_scope(ctx)
@@ -98,6 +109,7 @@ class CraigslistSource:
         fetched_at = self._now()
         by_id: dict[str, SourceRecord] = {}
         robots_blocked_areas: list[str] = []
+        self._prefiltered_record_count = 0
 
         for area in areas:
             try:
@@ -176,6 +188,9 @@ class CraigslistSource:
             should_fallback_to_html = (not _looks_like_rss_feed(rss_text)) or (
                 len(rss_items) == 0 and last_scan_iso == CL_EPOCH
             )
+            if not should_fallback_to_html:
+                raw_items = parse_cl_rss(rss_text, CL_EPOCH)
+                self._prefiltered_record_count += max(len(raw_items) - len(rss_items), 0)
 
         if not should_fallback_to_html:
             return rss_items

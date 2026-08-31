@@ -47,6 +47,30 @@ def test_discover_uses_previous_watermark_for_rss_prefilter() -> None:
     assert records == []
 
 
+def test_prefiltered_record_count_reflects_watermark_dropped_items() -> None:
+    source = CraigslistSource(fetch_text=_fixture_fetch_text, now=lambda: FIXED_NOW)
+    context = _build_context(
+        source_scan_state={
+            "craigslist": SourceScanState(previous_watermark="2024-08-06T19:00:00Z")
+        }
+    )
+
+    records = list(source.discover(context))
+
+    assert records == []
+    assert source.prefiltered_record_count() == 2
+
+
+def test_prefiltered_record_count_is_zero_on_first_scan() -> None:
+    source = CraigslistSource(fetch_text=_fixture_fetch_text, now=lambda: FIXED_NOW)
+    context = _build_context()
+
+    records = list(source.discover(context))
+
+    assert records
+    assert source.prefiltered_record_count() == 0
+
+
 def test_cl_posted_iso_handles_absolute_relative_and_month_day_labels() -> None:
     assert (
         cl_posted_iso("2024-08-06T18:23:40+00:00", label="", current=FIXED_NOW)
