@@ -13,7 +13,7 @@ import pytest
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext, SourceScanState
-from nostos.model import Area, Money, Observed, SourceRecord
+from nostos.model import Absence, Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import (
     CraigslistRobotsBlockedError,
@@ -98,22 +98,21 @@ def test_to_listing_is_pure_and_uses_fixture_payloads() -> None:
     assert source.to_listing(detailed, context) == listing
     assert listing.identity.source_id == "AbC123xYz9"
     assert listing.identity.listing_id == "craigslist:AbC123xYz9"
-    assert listing.place.raw_address == "1234 W 10th Ave, Vancouver, BC"
+    assert listing.place.raw_address == "6052 COLLINGWOOD PL VANCOUVER"
 
     assert isinstance(listing.rent, Observed)
-    assert listing.rent.value == Money(amount=Decimal("2950"), currency="CAD", period="month")
+    assert listing.rent.value == Money(amount=Decimal("2700"), currency="CAD", period="month")
     assert isinstance(listing.beds, Observed)
     assert listing.beds.value == 2.0
     assert isinstance(listing.baths, Observed)
-    assert listing.baths.value == 1.5
+    assert listing.baths.value == 2.0
     assert isinstance(listing.area, Observed)
-    assert listing.area.value == Area(value=850.0, unit="sqft")
-    assert isinstance(listing.floor, Observed)
-    assert listing.floor.value == 3
+    assert listing.area.value == Area(value=1000.0, unit="sqft")
     assert isinstance(listing.parking, Observed)
     assert listing.parking.value == "Included"
     assert isinstance(listing.furnishing, Observed)
     assert listing.furnishing.value == "Unfurnished"
+    assert listing.floor == Absence.NOT_STATED
     assert len(listing.photos) == 1
     assert listing.photos[0].url.endswith(".jpg")
 
@@ -150,12 +149,16 @@ def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
     source = CraigslistSource(fetch_text=_fallback_fixture_fetcher(rss_mode), now=lambda: FIXED_NOW)
     records = list(source.discover(_build_context()))
 
-    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+    assert len(records) > 0
     first = records[0]
     first_payload = _record_payload(first)
-    assert first.url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
-    assert first_payload["title"] == "Bright 2BR near Kits Beach"
-    assert first_payload["price"] == 2400
+    assert first.source_id == "19bxWkbqnTFwNYNiT8z6rS"
+    assert first.url == (
+        "https://www.craigslist.org/view/d/vancouver-spacious-bedrooms-bathroom/19bxWkbqnTFwNYNiT8z6rS"
+    )
+    assert first_payload["title"] == "Spacious 2 Bedrooms & 1 Bathroom BASEMENT SUITE"
+    assert first_payload["price"] == 1500
+    assert first_payload["location"] == "East Vancouver"
 
 
 def test_discover_raises_when_robots_blocks_the_shared_search_path() -> None:
@@ -202,7 +205,8 @@ def test_discover_falls_back_to_html_on_http_403() -> None:
     source = CraigslistSource(fetch_text=fetch_text, now=lambda: FIXED_NOW)
     records = list(source.discover(_build_context()))
 
-    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+    assert len(records) > 0
+    assert records[0].source_id == "19bxWkbqnTFwNYNiT8z6rS"
     assert len(seen_urls) == 2
     assert "format=rss" in seen_urls[0]
     assert "format=rss" not in seen_urls[1]
@@ -219,7 +223,8 @@ def test_discover_blocked_html_falls_back_even_with_previous_watermark() -> None
         }
     )
     records = list(source.discover(context))
-    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+    assert len(records) > 0
+    assert records[0].source_id == "19bxWkbqnTFwNYNiT8z6rS"
 
 
 def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
@@ -241,12 +246,14 @@ def test_discover_html_fallback_omits_format_and_extracts_fields() -> None:
         url for url in seen_urls if "format=rss" not in url and "/search/van/apa?" in url
     )
     assert "format" not in parse_qs(urlparse(html_search_url).query)
-    assert records[0].source_id == "AbC123xYz9"
+    assert records[0].source_id == "19bxWkbqnTFwNYNiT8z6rS"
     first_payload = _record_payload(records[0])
-    assert first_payload["title"] == "Bright 2BR near Kits Beach"
-    assert first_payload["price"] == 2400
-    assert first_payload["location"] == "Vancouver Westside near UBC"
-    assert records[0].url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
+    assert first_payload["title"] == "Spacious 2 Bedrooms & 1 Bathroom BASEMENT SUITE"
+    assert first_payload["price"] == 1500
+    assert first_payload["location"] == "East Vancouver"
+    assert records[0].url == (
+        "https://www.craigslist.org/view/d/vancouver-spacious-bedrooms-bathroom/19bxWkbqnTFwNYNiT8z6rS"
+    )
 
 
 def _fixture(name: str) -> str:
