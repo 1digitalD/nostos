@@ -69,6 +69,12 @@ uv run mypy --strict src tests
 uv run pytest
 ```
 
+## Contributing
+
+Citypacks (a new metro) and source adapters (a new site) are the main contribution
+surfaces. See [CONTRIBUTING.md](CONTRIBUTING.md) for the citypack schema, the `Source`
+protocol, the fixture and conformance requirements, and the checks every PR must pass.
+
 ## License
 
 Apache-2.0.
