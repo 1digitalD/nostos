@@ -565,6 +565,147 @@ def test_profile_flip_changes_rank_order_for_same_fixture_set(
     assert positive_order[:2] != negative_order[:2]
 
 
+def test_rank_after_cross_source_merge_keys_score_on_canonical_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`nostos rank` re-derives each Listing from its own source_record, which is
+    pure and only knows its own source/source_id — it must key the resulting
+    score on the canonical listing_id the record was actually stored under
+    (post cross-source dedupe), not on that freshly recomputed identity."""
+    shared_signature = "shared-unit|2500"
+    monkeypatch.setattr(
+        cli_module,
+        "SOURCE_FACTORIES",
+        {
+            "stub": lambda: StubSource(
+                records=(
+                    _record(
+                        "unit-a",
+                        in_suite_laundry=True,
+                        source="stub",
+                        signature=shared_signature,
+                    ),
+                ),
+            ),
+            "stub2": lambda: StubSource(
+                records=(
+                    _record(
+                        "unit-b",
+                        in_suite_laundry=True,
+                        source="stub2",
+                        signature=shared_signature,
+                    ),
+                ),
+                name="stub2",
+            ),
+        },
+    )
+    citypack_path = tmp_path / "citypack.yaml"
+    citypack_path.write_text(
+        json.dumps(
+            {
+                "name": "vancouver",
+                "locale": {
+                    "language": "en-CA",
+                    "timezone": "America/Vancouver",
+                    "currency": "CAD",
+                    "area_unit": "sqft",
+                },
+                "areas": [
+                    {
+                        "key": "kits_beach",
+                        "label": "Kitsilano",
+                        "keywords": ["kitsilano"],
+                        "bbox": [49.262, -123.190, 49.278, -123.145],
+                    }
+                ],
+                "sources": {
+                    "stub": {"enabled": True, "load_bearing": False},
+                    "stub2": {"enabled": True, "load_bearing": False},
+                },
+                "address": {
+                    "directional": {"w": "west"},
+                    "strip_tokens": ["vancouver"],
+                    "region_tokens": ["bc"],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    profile_path = tmp_path / "profile.yaml"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "city": "vancouver",
+                "hard": {
+                    "rent": {"max": 3200, "currency": "CAD"},
+                    "beds": {"eq": 2},
+                    "exclude": [],
+                },
+                "weights": {},
+                "proximity": [],
+                "avoid_areas": [],
+                "confidence": {"unverified_penalty": 0},
+                "sources": {"stub": "on", "stub2": "on"},
+                "notify": [],
+                "schedule": "0 */6 * * *",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "nostos.db"
+    runner = CliRunner()
+
+    watch_result = runner.invoke(
+        cli_module.app,
+        [
+            "watch",
+            "--citypack",
+            str(citypack_path),
+            "--profile",
+            str(profile_path),
+            "--db",
+            str(db_path),
+            "--source",
+            "stub",
+            "--source",
+            "stub2",
+            "--yes",
+        ],
+    )
+    assert watch_result.exit_code == 0, watch_result.output
+
+    with sqlite3.connect(db_path) as conn:
+        listing_count = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
+        score_count = conn.execute("SELECT COUNT(*) FROM score").fetchone()[0]
+    assert int(listing_count) == 1
+    assert int(score_count) == 1
+
+    rank_result = runner.invoke(
+        cli_module.app,
+        [
+            "rank",
+            "--citypack",
+            str(citypack_path),
+            "--profile",
+            str(profile_path),
+            "--db",
+            str(db_path),
+        ],
+    )
+    assert rank_result.exit_code == 0, rank_result.output
+
+    with sqlite3.connect(db_path) as conn:
+        listing_count = conn.execute("SELECT COUNT(*) FROM listing").fetchone()[0]
+        score_rows = conn.execute("SELECT listing_id FROM score").fetchall()
+    assert int(listing_count) == 1
+    assert len(score_rows) == 1
+    assert str(score_rows[0][0]) == "stub:unit-a"
+
+
 def test_list_excludes_real_basement_but_keeps_basement_storage_phrase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -899,6 +1040,8 @@ def _record(
     title: str | None = None,
     description: str | None = None,
     address: str | None = None,
+    source: str = "stub",
+    signature: str | None = None,
 ) -> SourceRecord:
     now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     listing_title = title or (
@@ -909,26 +1052,28 @@ def _record(
         if in_suite_laundry
         else "Shared laundry room in building."
     )
+    payload: dict[str, Any] = {
+        "title": listing_title,
+        "description": listing_description,
+        "address": address or f"{source_id} Example Street",
+        "rent": 2500,
+        "beds": beds,
+        "baths": 1.0,
+        "in_suite_laundry": in_suite_laundry,
+    }
+    if signature is not None:
+        payload["signature"] = signature
     return SourceRecord(
-        source="stub",
+        source=source,
         source_id=source_id,
-        url=f"https://example.test/stub/{source_id}",
+        url=f"https://example.test/{source}/{source_id}",
         content_hash=f"hash-{source_id}",
         fetched_at=now,
-        payload={
-            "title": listing_title,
-            "description": listing_description,
-            "address": address or f"{source_id} Example Street",
-            "rent": 2500,
-            "beds": beds,
-            "baths": 1.0,
-            "in_suite_laundry": in_suite_laundry,
-        },
+        payload=payload,
     )
 
 
 class StubSource:
-    name = "stub"
     capabilities = Capabilities(
         requires_credentials=False,
         supports_detail_fetch=False,
@@ -936,7 +1081,8 @@ class StubSource:
         rate_limit_per_minute=60.0,
     )
 
-    def __init__(self, *, records: tuple[SourceRecord, ...]) -> None:
+    def __init__(self, *, records: tuple[SourceRecord, ...], name: str = "stub") -> None:
+        self.name = name
         self._records = records
 
     def discover(self, _: SearchContext) -> Iterator[SourceRecord]:
@@ -951,6 +1097,7 @@ class StubSource:
     def to_listing(self, rec: SourceRecord, _: SearchContext) -> Listing:
         payload = _mapping(rec.payload)
         observed_at = rec.fetched_at
+        signature = str(payload.get("signature") or f"sig:{self.name}:{rec.source_id}")
         attributes: dict[str, Any] = {
             "title": _text_observed(str(payload["title"]), observed_at, evidence="stub title"),
             "description": _text_observed(
@@ -968,11 +1115,11 @@ class StubSource:
         }
         return Listing(
             identity=Identity(
-                listing_id=f"stub:{rec.source_id}",
-                source="stub",
+                listing_id=f"{self.name}:{rec.source_id}",
+                source=self.name,
                 source_id=rec.source_id,
                 url=rec.url,
-                signature=f"sig:stub:{rec.source_id}",
+                signature=signature,
             ),
             place=Place(
                 raw_address=str(payload["address"]),

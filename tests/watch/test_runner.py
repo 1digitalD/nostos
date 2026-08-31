@@ -699,6 +699,199 @@ def test_seen_ids_with_posted_timestamp_still_fetch_detail(tmp_path: Path) -> No
         assert source.fetch_detail_calls == 2
 
 
+def test_cross_source_duplicate_collapses_to_one_listing_row(tmp_path: Path) -> None:
+    """Same physical unit posted on two sites: one listing, two listing_source rows."""
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "alpha": {"enabled": True, "load_bearing": False},
+            "beta": {"enabled": True, "load_bearing": False},
+        }
+    )
+    shared_signature = "1234 west 10th|2950"
+    alpha = ScriptedSource(
+        name="alpha",
+        records=(_make_record("alpha", 1, minutes=1, signature=shared_signature),),
+    )
+    beta = ScriptedSource(
+        name="beta",
+        records=(_make_record("beta", 1, minutes=2, signature=shared_signature),),
+    )
+    notifier = RecordingNotifier()
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(alpha, beta),
+            profile_id="balanced",
+            notifier=notifier,
+            run_id="run-cross-source",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        listing_rows = conn.execute("SELECT id FROM listing").fetchall()
+        assert len(listing_rows) == 1
+        canonical_id = str(listing_rows[0]["id"])
+
+        source_rows = conn.execute(
+            "SELECT source, source_id FROM listing_source WHERE listing_id = ? ORDER BY source",
+            (canonical_id,),
+        ).fetchall()
+        assert [(str(row["source"]), str(row["source_id"])) for row in source_rows] == [
+            ("alpha", "alpha-1"),
+            ("beta", "beta-1"),
+        ]
+
+        assert int(conn.execute("SELECT COUNT(*) FROM score").fetchone()[0]) == 1
+
+        # Both sources' rent observations are retained (provenance preserved),
+        # not one overwriting the other.
+        rent_origins = conn.execute(
+            "SELECT origin FROM observation WHERE listing_id = ? AND field = 'rent' ORDER BY id",
+            (canonical_id,),
+        ).fetchall()
+        assert len(rent_origins) == 2
+
+        # The merged pair produces exactly one "new listing" notification line,
+        # not one per source.
+        new_listing_lines = [
+            line
+            for message in notifier.messages
+            if message.title == "Nostos new listings"
+            for line in message.body.splitlines()
+            if line.startswith("- ")
+        ]
+        assert len(new_listing_lines) == 1
+        assert canonical_id in new_listing_lines[0]
+
+
+def test_distinct_signatures_stay_separate(tmp_path: Path) -> None:
+    """Two genuinely different units, even from different sources, do not merge."""
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "alpha": {"enabled": True, "load_bearing": False},
+            "beta": {"enabled": True, "load_bearing": False},
+        }
+    )
+    alpha = ScriptedSource(
+        name="alpha",
+        records=(_make_record("alpha", 1, minutes=1, signature="1234 west 10th|2950"),),
+    )
+    beta = ScriptedSource(
+        name="beta",
+        records=(_make_record("beta", 1, minutes=2, signature="5678 east 5th|1800"),),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(alpha, beta),
+            profile_id="balanced",
+            run_id="run-distinct",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        listing_rows = conn.execute("SELECT id FROM listing ORDER BY id").fetchall()
+        assert [str(row["id"]) for row in listing_rows] == ["alpha:alpha-1", "beta:beta-1"]
+        assert int(conn.execute("SELECT COUNT(*) FROM score").fetchone()[0]) == 2
+
+
+def test_cross_source_dedupe_holds_across_two_runs(tmp_path: Path) -> None:
+    """A duplicate arriving from a second source in a later run adopts the
+    canonical id already recorded for that signature, rather than creating a
+    second listing row."""
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "alpha": {"enabled": True, "load_bearing": False},
+            "beta": {"enabled": True, "load_bearing": False},
+        }
+    )
+    shared_signature = "1234 west 10th|2950"
+    alpha = ScriptedSource(
+        name="alpha",
+        records=(_make_record("alpha", 1, minutes=1, signature=shared_signature),),
+    )
+    beta = ScriptedSource(
+        name="beta",
+        records=(_make_record("beta", 1, minutes=2, signature=shared_signature),),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(alpha,),
+            profile_id="balanced",
+            run_id="run-first-source-only",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(beta,),
+            profile_id="balanced",
+            run_id="run-second-source-arrives",
+            now=lambda: datetime(2026, 1, 3, 3, 4, 5, tzinfo=UTC),
+        )
+
+        listing_rows = conn.execute("SELECT id FROM listing").fetchall()
+        assert len(listing_rows) == 1
+        canonical_id = str(listing_rows[0]["id"])
+        assert canonical_id == "alpha:alpha-1"
+
+        source_rows = conn.execute(
+            "SELECT source FROM listing_source WHERE listing_id = ? ORDER BY source",
+            (canonical_id,),
+        ).fetchall()
+        assert [str(row["source"]) for row in source_rows] == ["alpha", "beta"]
+
+
+def test_same_source_signature_collision_does_not_merge(tmp_path: Path) -> None:
+    """Known limitation, made explicit: the signature is address tokens plus a
+    coarse price bucket, so two different units in the same building at the
+    same rent (e.g. #305 and #410, both $2950) hash identically. Merging is
+    restricted to cross-source matches (see `_canonicalize_listings`), so two
+    listings from the *same* source that collide on signature are kept apart
+    rather than being silently folded into one — the safe failure mode, even
+    though it means a genuine same-source repost under a new source_id also
+    will not be merged by this mechanism."""
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "alpha": {"enabled": True, "load_bearing": False},
+        }
+    )
+    shared_signature = "1234 west 10th|2950"
+    alpha = ScriptedSource(
+        name="alpha",
+        records=(
+            _make_record("alpha", 1, minutes=1, signature=shared_signature),
+            _make_record("alpha", 2, minutes=2, signature=shared_signature),
+        ),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(alpha,),
+            profile_id="balanced",
+            run_id="run-same-source-collision",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        listing_rows = conn.execute("SELECT id FROM listing ORDER BY id").fetchall()
+        assert [str(row["id"]) for row in listing_rows] == ["alpha:alpha-1", "alpha:alpha-2"]
+
+
 class ScriptedSource:
     def __init__(
         self,
@@ -742,13 +935,14 @@ class ScriptedSource:
         payload = _payload_mapping(rec.payload)
         observed_at = rec.fetched_at
         rent_amount = Decimal(str(payload.get("rent", 2000)))
+        signature = str(payload.get("signature") or f"sig:{self.name}:{rec.source_id}")
         return Listing(
             identity=Identity(
                 listing_id=f"{self.name}:{rec.source_id}",
                 source=self.name,
                 source_id=rec.source_id,
                 url=rec.url,
-                signature=f"sig:{self.name}:{rec.source_id}",
+                signature=signature,
             ),
             place=Place(
                 raw_address=str(payload.get("address", "123 Example St")),
@@ -799,6 +993,7 @@ def _make_record(
     minutes: int,
     fetched_at: datetime | None = None,
     posted: str | None = None,
+    signature: str | None = None,
 ) -> SourceRecord:
     timestamp = fetched_at or datetime(2026, 1, 2, 0, minutes, 0, tzinfo=UTC)
     payload: dict[str, Any] = {
@@ -811,6 +1006,8 @@ def _make_record(
     }
     if posted is not None:
         payload["posted"] = posted
+    if signature is not None:
+        payload["signature"] = signature
     return SourceRecord(
         source=source,
         source_id=f"{source}-{suffix}",

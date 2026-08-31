@@ -486,6 +486,19 @@ def rank_command(
                 if source_obj is None:
                     continue
                 listing = source_obj.to_listing(record_row.record, context)
+                # `to_listing` is pure and only knows the raw record's own
+                # source/source_id, so it always derives a per-source identity.
+                # `record_row.listing_id` is the canonical id this record was
+                # actually stored under (post cross-source dedupe) — key the
+                # score on that, not on the freshly recomputed identity.
+                if listing.identity.listing_id != record_row.listing_id:
+                    listing = listing.model_copy(
+                        update={
+                            "identity": listing.identity.model_copy(
+                                update={"listing_id": record_row.listing_id}
+                            )
+                        }
+                    )
                 scored_listing = score_listing_for_profile(
                     listing,
                     context=context,
