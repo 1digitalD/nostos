@@ -14,6 +14,7 @@ dependencies = [
   "apprise",
   "extruct>=0.18.0",
   "httpx>=0.28.1",
+  "mcp>=2.1.1",
   "protego>=0.6.2",
   "pydantic>=2.13.4",
   "selectolax>=0.4.11",
@@ -27,6 +28,7 @@ Issues = "https://github.com/1digitalD/nostos/issues"
 
 [project.scripts]
 nostos = "nostos.cli:app"
+nostos-mcp = "nostos.mcp.server:main"
 
 [dependency-groups]
 dev = [
@@ -45,7 +47,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["apprise", "extruct", "protego"]
+module = ["apprise", "extruct", "mcp", "mcp.*", "protego"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
