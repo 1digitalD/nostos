@@ -59,7 +59,7 @@ def test_repo_balanced_profile_example_loads() -> None:
 
 def test_example_profile_area_keys_are_present_in_citypack() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
+    citypack = load_citypack(repo_root / "src" / "nostos" / "citypacks" / "vancouver.yaml")
     example = load_profile(repo_root / "profiles" / "example-vancouver.yaml")
 
     assert set(example.area_key_weights).issubset(citypack.area_keys)

@@ -458,7 +458,7 @@ def rank_command(
     Examples:
       nostos rank
       nostos rank --profile ~/.config/nostos/profile-work.yaml --db ~/.local/share/nostos/nostos.db
-      nostos rank --citypack ./citypacks/vancouver.yaml
+      nostos rank --citypack ./src/nostos/citypacks/vancouver.yaml
     """
 
     profile_path = _resolve_profile_path(profile)
@@ -739,11 +739,9 @@ def _resolve_citypack_path(path: Path | None) -> Path:
 
 def _default_citypack_candidates() -> list[Path]:
     package_citypack = Path(__file__).resolve().parent / "citypacks" / DEFAULT_CITYPACK_FILE
-    package_root = Path(__file__).resolve().parents[2]
     return [
         Path.cwd() / "citypacks" / DEFAULT_CITYPACK_FILE,
         package_citypack,
-        package_root / "citypacks" / DEFAULT_CITYPACK_FILE,
     ]
 
 

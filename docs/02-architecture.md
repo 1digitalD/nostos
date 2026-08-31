@@ -115,9 +115,9 @@ nostos/
 │   │   ├── runner.py             orchestrates one run, concurrent per source
 │   │   ├── notify.py             apprise sink
 │   │   └── health.py             per-source baselines, load_bearing
+│   ├── citypacks/vancouver.yaml  shipped default citypack
 │   ├── ui/                       FastAPI + htmx, no build step          [R2]
 │   └── mcp/server.py             thin tool wrapper                      [R1/R2]
-├── citypacks/vancouver.yaml
 ├── profiles/balanced.yaml · example-vancouver.yaml
 └── tests/
     ├── fixtures/<source>/        recorded pages — parsers test offline

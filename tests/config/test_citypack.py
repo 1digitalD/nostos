@@ -140,20 +140,12 @@ def test_citypack_rejects_inline_credentials(tmp_path: Path) -> None:
         load_citypack(citypack_path)
 
 
-def test_repo_vancouver_example_loads() -> None:
+def test_packaged_vancouver_example_loads() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    citypack_path = repo_root / "citypacks" / "vancouver.yaml"
+    citypack_path = repo_root / "src" / "nostos" / "citypacks" / "vancouver.yaml"
 
     loaded = load_citypack(citypack_path)
 
     assert loaded.name == "vancouver"
     assert loaded.area_keys
     assert REQUIRED_VANCOUVER_AREA_KEYS.issubset(loaded.area_keys)
-
-
-def test_packaged_citypack_matches_repo_citypack_area_keys() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    repo_citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
-    packaged_citypack = load_citypack(repo_root / "src" / "nostos" / "citypacks" / "vancouver.yaml")
-
-    assert packaged_citypack.area_keys == repo_citypack.area_keys
