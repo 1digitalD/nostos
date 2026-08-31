@@ -116,6 +116,32 @@ def test_init_tool_invokes_cli_with_expected_argv(monkeypatch: pytest.MonkeyPatc
     ]
 
 
+def test_watch_tool_defaults_yes_for_non_interactive_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[str]] = []
+
+    def fake_invoke(argv: list[str]) -> str:
+        captured.append(list(argv))
+        return "ok"
+
+    monkeypatch.setattr(mcp_server, "_invoke_cli", fake_invoke)
+
+    result = mcp_server.watch(profile="/tmp/profile.yaml", db="/tmp/nostos.db")
+
+    assert result == "ok"
+    assert captured == [
+        [
+            "watch",
+            "--profile",
+            "/tmp/profile.yaml",
+            "--db",
+            "/tmp/nostos.db",
+            "--yes",
+        ]
+    ]
+
+
 def test_watch_tool_invokes_cli_with_expected_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
 

@@ -115,9 +115,12 @@ def watch(
     citypack: str | None = None,
     source: list[str] | None = None,
     dry_run: bool = False,
-    yes: bool = False,
+    yes: bool = True,
 ) -> str:
-    """Run the watch pipeline. Wraps `nostos watch`."""
+    """Run the watch pipeline. Wraps `nostos watch`.
+
+    Defaults `yes` to true because MCP runs are non-interactive.
+    """
 
     argv = ["watch"]
     if profile is not None:
