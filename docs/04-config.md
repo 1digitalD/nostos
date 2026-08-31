@@ -16,7 +16,7 @@ meant forking a citypack and two people in one city could not share the city dat
 
 ## Citypack
 
-`citypacks/vancouver.yaml` — shipped, community-contributable.
+`src/nostos/citypacks/vancouver.yaml` — shipped, community-contributable.
 
 ```yaml
 name: vancouver

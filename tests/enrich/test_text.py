@@ -123,7 +123,7 @@ def test_marketing_copy_minutes_from_yaletown_does_not_set_neighbourhood_with_sh
         description="Beautiful apartment just minutes from Yaletown and downtown nightlife.",
     )
     repo_root = Path(__file__).resolve().parents[2]
-    citypack = load_citypack(repo_root / "citypacks" / "vancouver.yaml")
+    citypack = load_citypack(repo_root / "src" / "nostos" / "citypacks" / "vancouver.yaml")
     profile = Profile.model_validate(
         {"city": "vancouver", "weights": {}, "schedule": "0 */6 * * *"}
     )

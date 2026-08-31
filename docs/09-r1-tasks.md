@@ -86,7 +86,7 @@ keyed by `profile_id`.
 
 ## T6 · Config
 **Branch** `t6-config` · **Reads** `04-config.md`
-`config/citypack.py`, `config/profile.py`, `context.py`, plus `citypacks/vancouver.yaml`
+`config/citypack.py`, `config/profile.py`, `context.py`, plus `src/nostos/citypacks/vancouver.yaml`
 and `profiles/balanced.yaml`.
 **Done when** a citypack missing an optional adapter section loads fine; a malformed one
 raises with a dotted path; `SearchContext` resolves and exposes `has_area(key)`.

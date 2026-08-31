@@ -33,9 +33,9 @@ nostos list
 You can still pass explicit paths if you prefer:
 
 ```bash
-nostos init --citypack ./citypacks/vancouver.yaml --profile ./profile.yaml --force
-nostos watch --citypack ./citypacks/vancouver.yaml --profile ./profile.yaml --db ./nostos.db --yes
-nostos list --citypack ./citypacks/vancouver.yaml --profile ./profile.yaml --db ./nostos.db --limit 20
+nostos init --citypack ./src/nostos/citypacks/vancouver.yaml --profile ./profile.yaml --force
+nostos watch --citypack ./src/nostos/citypacks/vancouver.yaml --profile ./profile.yaml --db ./nostos.db --yes
+nostos list --citypack ./src/nostos/citypacks/vancouver.yaml --profile ./profile.yaml --db ./nostos.db --limit 20
 ```
 
 ### Non-interactive init example
