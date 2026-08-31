@@ -15,7 +15,12 @@ from nostos.config.profile import Profile
 from nostos.context import SearchContext, SourceScanState
 from nostos.model import Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
-from nostos.sources.craigslist import CraigslistSource, cl_posted_iso, parse_cl_rss
+from nostos.sources.craigslist import (
+    CraigslistRobotsBlockedError,
+    CraigslistSource,
+    cl_posted_iso,
+    parse_cl_rss,
+)
 from nostos.sources.http import RobotsDisallowedError
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
@@ -129,13 +134,43 @@ def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
     assert first_payload["price"] == 2400
 
 
-def test_discover_falls_back_to_html_when_rss_is_robots_disallowed() -> None:
+def test_discover_raises_when_robots_blocks_the_shared_search_path() -> None:
+    """A real robots.txt disallow is a path-prefix rule (e.g. ``Disallow: /search``),
+    not a query-string match -- it blocks the RSS and HTML search URLs alike, since
+    both live under ``/search/{area}/apa``. Falling back to HTML cannot recover
+    anything in that case, so discover() must surface the block instead of quietly
+    reporting zero listings for what looks like a quiet market."""
+    seen_urls: list[str] = []
+
+    def fetch_text(url: str) -> str:
+        seen_urls.append(url)
+        if "/search/" in url:
+            raise RobotsDisallowedError(url, "disallowed for user-agent: Disallow: /search")
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(fetch_text=fetch_text, now=lambda: FIXED_NOW)
+
+    with pytest.raises(CraigslistRobotsBlockedError, match="robots.txt disallows"):
+        list(source.discover(_build_context()))
+
+    # The HTML URL was never attempted: it shares the /search path prefix the RSS
+    # URL was already blocked on, so trying it would only waste a request.
+    assert seen_urls == [seen_urls[0]]
+    assert "format=rss" in seen_urls[0]
+
+
+def test_discover_falls_back_to_html_on_http_403() -> None:
+    """Unlike a robots.txt disallow, an HTTP 403 on the RSS URL alone (a realistic
+    bot-detection response some hosts use) does not imply the HTML URL is blocked
+    too -- this is the one case the fallback can genuinely recover from."""
     seen_urls: list[str] = []
 
     def fetch_text(url: str) -> str:
         seen_urls.append(url)
         if "format=rss" in url:
-            raise RobotsDisallowedError(url, "rss feed disallowed")
+            request = httpx.Request("GET", url)
+            response = httpx.Response(status_code=403, request=request, text="blocked")
+            raise httpx.HTTPStatusError("403 blocked", request=request, response=response)
         if "/search/van/apa?" in url:
             return _fixture("search_results.html")
         raise AssertionError(f"unexpected craigslist fixture URL: {url}")
@@ -144,8 +179,9 @@ def test_discover_falls_back_to_html_when_rss_is_robots_disallowed() -> None:
     records = list(source.discover(_build_context()))
 
     assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
-    assert any("format=rss" in url for url in seen_urls)
-    assert any("format=rss" not in url and "/search/van/apa?" in url for url in seen_urls)
+    assert len(seen_urls) == 2
+    assert "format=rss" in seen_urls[0]
+    assert "format=rss" not in seen_urls[1]
 
 
 def test_discover_blocked_html_falls_back_even_with_previous_watermark() -> None:

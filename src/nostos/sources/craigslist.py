@@ -48,6 +48,26 @@ _SQFT_RE = re.compile(r"(\d{3,5})\s*(?:ft2|sq\s*ft|sqft|square\s*feet)\b", re.IG
 _UNIT_RE = re.compile(r"(?:#|unit|apt|suite)\s*(\d{1,4})", re.IGNORECASE)
 
 
+class CraigslistRobotsBlockedError(Exception):
+    """Raised when robots.txt refused every discovery URL for every configured area.
+
+    A real robots.txt disallow is a path-prefix rule, so a rule that blocks the RSS
+    search URL (``/search/{area}/apa?format=rss``) blocks the HTML search URL under
+    the same ``/search`` prefix too -- falling back to HTML cannot recover discovery
+    in that case. When this happens for every area, the source cannot discover
+    anything at all, which is a hard failure rather than a quiet market.
+    """
+
+    def __init__(self, *, base_url: str, areas: Sequence[str]) -> None:
+        self.base_url = base_url
+        self.areas = tuple(areas)
+        area_list = ", ".join(self.areas) or "no configured areas"
+        super().__init__(
+            f"craigslist: robots.txt disallows every discovery URL under {base_url} "
+            f"for area(s) {area_list}"
+        )
+
+
 class CraigslistSource:
     name = CL_SOURCE_NAME
     capabilities = Capabilities(
@@ -77,14 +97,21 @@ class CraigslistSource:
         last_scan_iso = ctx.scan_state_for(self.name).previous_watermark or CL_EPOCH
         fetched_at = self._now()
         by_id: dict[str, SourceRecord] = {}
+        robots_blocked_areas: list[str] = []
 
         for area in areas:
-            for item in self._discover_area(
-                base_url=base_url,
-                area=area,
-                query=query,
-                last_scan_iso=last_scan_iso,
-            ):
+            try:
+                area_items = self._discover_area(
+                    base_url=base_url,
+                    area=area,
+                    query=query,
+                    last_scan_iso=last_scan_iso,
+                )
+            except RobotsDisallowedError:
+                robots_blocked_areas.append(area)
+                continue
+
+            for item in area_items:
                 source_id = _coerce_str(item.get("id"))
                 if not source_id:
                     continue
@@ -111,6 +138,9 @@ class CraigslistSource:
                     payload=payload,
                 )
 
+        if robots_blocked_areas and len(robots_blocked_areas) == len(areas):
+            raise CraigslistRobotsBlockedError(base_url=base_url, areas=robots_blocked_areas)
+
         ordered = sorted(by_id.values(), key=lambda rec: rec.source_id)
         return iter(ordered)
 
@@ -129,7 +159,12 @@ class CraigslistSource:
         try:
             rss_text = self._fetch_text(rss_url)
         except RobotsDisallowedError:
-            should_fallback_to_html = True
+            # robots.txt disallows are path-prefix rules. The HTML URL lives under
+            # the same /search/{area}/apa path as the RSS URL, so it would be
+            # disallowed too -- falling back here can never recover anything, only
+            # spend a request confirming what we already know. Let the caller
+            # (discover) record this area as robots-blocked instead.
+            raise
         except httpx.HTTPStatusError as exc:
             should_fallback_to_html = bool(
                 exc.response is not None and exc.response.status_code == 403
@@ -148,10 +183,7 @@ class CraigslistSource:
         html_query = dict(query)
         html_query.pop("format", None)
         html_url = f"{base_url}/search/{area}/apa?{urlencode(html_query)}"
-        try:
-            html_text = self._fetch_text(html_url)
-        except RobotsDisallowedError:
-            return []
+        html_text = self._fetch_text(html_url)
         return parse_cl_search_html(html_text, last_scan_iso)
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
