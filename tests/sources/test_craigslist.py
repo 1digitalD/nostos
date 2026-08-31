@@ -16,6 +16,7 @@ from nostos.context import SearchContext, SourceScanState
 from nostos.model import Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import CraigslistSource, cl_posted_iso, parse_cl_rss
+from nostos.sources.http import RobotsDisallowedError
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
 FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
@@ -126,6 +127,25 @@ def test_discover_falls_back_to_html_when_rss_is_blocked(rss_mode: str) -> None:
     assert first.url == "https://www.craigslist.org/view/d/vancouver-bright-2br/AbC123xYz9"
     assert first_payload["title"] == "Bright 2BR near Kits Beach"
     assert first_payload["price"] == 2400
+
+
+def test_discover_falls_back_to_html_when_rss_is_robots_disallowed() -> None:
+    seen_urls: list[str] = []
+
+    def fetch_text(url: str) -> str:
+        seen_urls.append(url)
+        if "format=rss" in url:
+            raise RobotsDisallowedError(url, "rss feed disallowed")
+        if "/search/van/apa?" in url:
+            return _fixture("search_results.html")
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(fetch_text=fetch_text, now=lambda: FIXED_NOW)
+    records = list(source.discover(_build_context()))
+
+    assert [record.source_id for record in records] == ["AbC123xYz9", "zZ9yY8xX7w"]
+    assert any("format=rss" in url for url in seen_urls)
+    assert any("format=rss" not in url and "/search/van/apa?" in url for url in seen_urls)
 
 
 def test_discover_blocked_html_falls_back_even_with_previous_watermark() -> None:
