@@ -528,17 +528,19 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
             run_id="run-craigslist-first",
             now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
-        assert len(detailed_urls) == 2
+        assert len(detailed_urls) == 359
         first_signature = _listing_source_signature(
             conn,
             source="craigslist",
-            source_id="AbC123xYz9",
+            source_id="ttyaU3MwTGwwdBcafMuZiN",
         )
-        assert _projected_rent_amount(conn, listing_id="craigslist:AbC123xYz9") == Decimal("2950")
+        assert _projected_rent_amount(
+            conn, listing_id="craigslist:ttyaU3MwTGwwdBcafMuZiN"
+        ) == Decimal("2700")
         assert (
             _count_observations(
                 conn,
-                listing_id="craigslist:AbC123xYz9",
+                listing_id="craigslist:ttyaU3MwTGwwdBcafMuZiN",
                 field="rent",
                 origin=Origin.SOURCE_FIELD.value,
             )
@@ -553,13 +555,15 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
             run_id="run-craigslist-second",
             now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
         )
-        assert len(detailed_urls) == 2
-        assert second_report.source_reports["craigslist"].count == 2
-        assert _projected_rent_amount(conn, listing_id="craigslist:AbC123xYz9") == Decimal("2950")
+        assert len(detailed_urls) == 359
+        assert second_report.source_reports["craigslist"].count == 359
+        assert _projected_rent_amount(
+            conn, listing_id="craigslist:ttyaU3MwTGwwdBcafMuZiN"
+        ) == Decimal("2700")
         assert (
             _count_observations(
                 conn,
-                listing_id="craigslist:AbC123xYz9",
+                listing_id="craigslist:ttyaU3MwTGwwdBcafMuZiN",
                 field="rent",
                 origin=Origin.SOURCE_FIELD.value,
             )
@@ -569,12 +573,14 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
             _count_source_records(
                 conn,
                 source="craigslist",
-                source_id="AbC123xYz9",
+                source_id="ttyaU3MwTGwwdBcafMuZiN",
             )
             == 1
         )
         assert (
-            _listing_source_signature(conn, source="craigslist", source_id="AbC123xYz9")
+            _listing_source_signature(
+                conn, source="craigslist", source_id="ttyaU3MwTGwwdBcafMuZiN"
+            )
             == first_signature
         )
 
@@ -585,7 +591,7 @@ def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None
     fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
     search_html = (fixture_dir / "search_results.html").read_text(encoding="utf-8")
     search_html_run2 = search_html.replace(
-        "</ul>",
+        "</ol>",
         """
       <li class="cl-static-search-result" title="New 2BR only on run 2">
         <a href="https://www.craigslist.org/view/d/vancouver-new-2br/NewRun2xY1">
@@ -596,7 +602,7 @@ def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None
           </div>
         </a>
       </li>
-    </ul>
+    </ol>
         """,
     )
     blocked_rss_html = (fixture_dir / "rss_blocked.html").read_text(encoding="utf-8")
@@ -640,7 +646,7 @@ def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None
             run_id="run-craigslist-first",
             now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
-        assert len(detailed_urls) == 2
+        assert len(detailed_urls) == 359
 
         second_report = run_watch(
             conn=conn,
@@ -650,10 +656,10 @@ def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None
             run_id="run-craigslist-second",
             now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
         )
-        assert len(detailed_urls) == 3
+        assert len(detailed_urls) == 360
         assert detailed_urls[-1].endswith("/NewRun2xY1")
-        assert second_report.source_reports["craigslist"].count == 3
-        assert _projected_rent_amount(conn, listing_id="craigslist:NewRun2xY1") == Decimal("3100")
+        assert second_report.source_reports["craigslist"].count == 360
+        assert _projected_rent_amount(conn, listing_id="craigslist:NewRun2xY1") == Decimal("2700")
         assert _count_source_records(conn, source="craigslist", source_id="NewRun2xY1") == 1
 
 

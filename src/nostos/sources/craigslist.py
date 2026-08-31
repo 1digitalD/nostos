@@ -44,7 +44,7 @@ _ID_RE = re.compile(r"/([A-Za-z0-9]+)(?:[?#].*)?$")
 _PRICE_RE = re.compile(r"\$([\d,]+)")
 _BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*br\b", re.IGNORECASE)
 _BATHS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)s?\b", re.IGNORECASE)
-_SQFT_RE = re.compile(r"(\d{3,5})\s*(?:ft2|sq\s*ft|sqft|square\s*feet)\b", re.IGNORECASE)
+_SQFT_RE = re.compile(r"(\d{3,5})\s*(?:ft2|sq\.?\s*ft|sqft|square\s*feet)\b", re.IGNORECASE)
 _UNIT_RE = re.compile(r"(?:#|unit|apt|suite)\s*(\d{1,4})", re.IGNORECASE)
 
 
