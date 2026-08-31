@@ -699,6 +699,95 @@ def test_seen_ids_with_posted_timestamp_still_fetch_detail(tmp_path: Path) -> No
         assert source.fetch_detail_calls == 2
 
 
+def test_second_craigslist_watch_with_nothing_new_does_not_alert(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_craigslist_context()
+    fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
+    rss_xml = (fixture_dir / "rss.xml").read_text(encoding="utf-8")
+    detail_html = (fixture_dir / "detail.html").read_text(encoding="utf-8")
+
+    def fetch_text(url: str) -> str:
+        if "format=rss" in url:
+            return rss_xml
+        if "AbC123xYz9" in url or "zZ9yY8xX7w" in url:
+            return detail_html
+        raise AssertionError(f"unexpected craigslist fixture URL: {url}")
+
+    source = CraigslistSource(
+        fetch_text=fetch_text,
+        now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+    notifier = RecordingNotifier()
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        first_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            notifier=notifier,
+            run_id="run-craigslist-quiet-first",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        assert first_report.source_reports["craigslist"].count == 2
+        assert first_report.alerts == ()
+
+        # Nothing new posted since the first run: the RSS feed still contains the
+        # same two listings, both older than the watermark the first run set.
+        second_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            notifier=notifier,
+            run_id="run-craigslist-quiet-second",
+            now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
+        )
+
+    assert second_report.source_reports["craigslist"].count == 2
+    assert second_report.alerts == ()
+    joined = "\n".join(message.body for message in notifier.messages)
+    assert "load-bearing" not in joined
+
+
+def test_load_bearing_source_with_nothing_ever_found_alerts_every_run(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={
+            "empty_source": {"enabled": True, "load_bearing": True},
+        }
+    )
+    notifier = RecordingNotifier()
+    source = ScriptedSource(name="empty_source", records=())
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        first_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            notifier=notifier,
+            run_id="run-empty-first",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+        second_report = run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            notifier=notifier,
+            run_id="run-empty-second",
+            now=lambda: datetime(2026, 1, 2, 9, 4, 5, tzinfo=UTC),
+        )
+
+    assert first_report.source_reports["empty_source"].count == 0
+    assert second_report.source_reports["empty_source"].count == 0
+    assert any("load-bearing" in alert for alert in first_report.alerts)
+    assert any("load-bearing" in alert for alert in second_report.alerts)
+
+
 class ScriptedSource:
     def __init__(
         self,

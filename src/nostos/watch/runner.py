@@ -67,12 +67,18 @@ class _SourceSnapshot:
     records_seen: int
     listings: tuple[_PersistableListing, ...]
     skipped_records: int
+    prefiltered_records: int
     candidate_watermark: str | None
     error: str | None
 
     @property
     def count(self) -> int:
-        return len(self.listings) + self.skipped_records
+        # "Currently tracked", not "new this run": listings persisted this run, plus
+        # ones a source recognized as already-seen and skipped re-fetching, plus ones
+        # a source's own watermark prefilter dropped before they reached discover() at
+        # all (still live, just not new — see CraigslistSource.prefiltered_record_count).
+        # A source genuinely returning nothing keeps all three at zero.
+        return len(self.listings) + self.skipped_records + self.prefiltered_records
 
 
 def run_watch(
@@ -241,6 +247,7 @@ def _collect_sources(
                         records_seen=0,
                         listings=(),
                         skipped_records=0,
+                        prefiltered_records=0,
                         candidate_watermark=None,
                         error=str(exc),
                     )
@@ -259,6 +266,7 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
             records_seen=0,
             listings=(),
             skipped_records=0,
+            prefiltered_records=0,
             candidate_watermark=None,
             error=str(exc),
         )
@@ -314,6 +322,7 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
         records_seen=len(discovered),
         listings=tuple(persistable),
         skipped_records=skipped_records,
+        prefiltered_records=_prefiltered_record_count(source),
         candidate_watermark=max_fetched_at.isoformat() if max_fetched_at else None,
         error=source_error,
     )
@@ -481,6 +490,7 @@ def _build_counts_json(
             "status": snapshot.status,
             "count": snapshot.count,
             "records_seen": snapshot.records_seen,
+            "prefiltered_records": snapshot.prefiltered_records,
             "load_bearing": decision.load_bearing,
             "baseline": {
                 "value": decision.baseline.baseline,
@@ -561,6 +571,25 @@ def _should_skip_detail_fetch(*, record: SourceRecord, seen_source_ids: frozense
     if not isinstance(payload, Mapping):
         return False
     return _coerce_str(payload.get("posted")) == ""
+
+
+def _prefiltered_record_count(source: Source) -> int:
+    """Records a source's own watermark prefilter dropped before `discover()` returned.
+
+    Optional, duck-typed: a source may expose `prefiltered_record_count() -> int` to
+    report how many currently-live records it recognized as not-new and left out of
+    its `discover()` result entirely (see CraigslistSource, whose RSS prefilter is a
+    documented, load-bearing part of its shape). Sources that don't implement it
+    report zero, matching today's behaviour.
+    """
+    getter = getattr(source, "prefiltered_record_count", None)
+    if not callable(getter):
+        return 0
+    try:
+        value = getter()
+    except Exception:  # noqa: BLE001 - a diagnostic accessor must never fail the run
+        return 0
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 def _existing_listing_ids(*, conn: sqlite3.Connection, listing_ids: tuple[str, ...]) -> set[str]:
