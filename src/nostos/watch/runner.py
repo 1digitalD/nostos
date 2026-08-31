@@ -152,6 +152,7 @@ def run_watch(
         for snapshot in snapshots
         for listing in snapshot.listings
     )
+    persistable = _canonicalize_listings(conn=conn, listings=persistable)
     new_listing_ids = _persist_stage(conn=conn, listings=persistable)
 
     active_enrichers = tuple(enrichers or (TextRuleEnricher(),))
@@ -319,6 +320,112 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
     )
 
 
+def _canonicalize_listings(
+    *,
+    conn: sqlite3.Connection,
+    listings: tuple[_PersistableListing, ...],
+) -> tuple[_PersistableListing, ...]:
+    """Resolve one canonical listing_id per cross-source signature.
+
+    ``listing_source.signature`` exists precisely so one physical unit posted on
+    several sites collapses to one ``listing`` row (docs/03-data-model.md:128-129).
+    This maps each item's signature to a canonical id — preferring a canonical id
+    already recorded in the store, then one already claimed earlier in this same
+    run — and rewrites ``identity.listing_id`` accordingly. ``source``, ``source_id``
+    and ``signature`` on the identity are left untouched, so each item still writes
+    its own ``listing_source`` row and its own observations (with their own origin)
+    once persisted — only the row they land under is shared.
+
+    Merging is deliberately restricted to *different* sources sharing a signature.
+    The signature is address tokens plus a coarse price bucket (25-unit rounding);
+    two distinct units in the same building at the same rent (#305 and #410, both
+    $2950) hash identically. Within one source, ``source+source_id`` is already a
+    reliable identity, so a same-source signature match is far more likely to be
+    that coincidence than a genuine repost — merging on it would silently fold
+    two different apartments into one listing. Restricting merges to cross-source
+    matches keeps the common case (the same unit cross-posted to two sites)
+    working while leaving that same-source collision unmerged. It does not
+    eliminate the risk for two *different* sources that happen to describe two
+    different units at an identical address/price bucket — see the PR
+    description for that residual exposure.
+    """
+    if not listings:
+        return listings
+
+    signatures = tuple({item.listing.identity.signature for item in listings})
+    claims = _existing_canonical_by_signature(conn=conn, signatures=signatures)
+
+    canonicalized: list[_PersistableListing] = []
+    for item in listings:
+        identity = item.listing.identity
+        signature = identity.signature
+        own_id = identity.listing_id
+        own_source = identity.source
+
+        claim = claims.get(signature)
+        if claim is not None and own_source not in claim[1]:
+            canonical_id = claim[0]
+            claim[1].add(own_source)
+        else:
+            canonical_id = own_id
+            if claim is None:
+                claims[signature] = (own_id, {own_source})
+            # else: this source already claims this signature (from a prior
+            # run, or an earlier item in this same run) — keep this item under
+            # its own id rather than risk merging two different units from the
+            # same source that happen to share a signature.
+
+        if canonical_id == own_id:
+            canonicalized.append(item)
+            continue
+
+        remapped_identity = identity.model_copy(update={"listing_id": canonical_id})
+        remapped_listing = item.listing.model_copy(update={"identity": remapped_identity})
+        canonicalized.append(replace(item, listing=remapped_listing))
+
+    return tuple(canonicalized)
+
+
+def _existing_canonical_by_signature(
+    *,
+    conn: sqlite3.Connection,
+    signatures: tuple[str, ...],
+) -> dict[str, tuple[str, set[str]]]:
+    """signature -> (canonical listing_id, sources already recorded under it).
+
+    When a signature already has ``listing_source`` rows from a prior run, the
+    canonical id is the earliest-first-seen listing (tie-broken by id) — stable
+    and deterministic even if legacy data left more than one listing sharing a
+    signature. Only sources actually recorded under *that* chosen listing count
+    towards the "already claimed" set used to block same-source merges.
+    """
+    if not signatures:
+        return {}
+    placeholders = ",".join("?" for _ in signatures)
+    rows = conn.execute(
+        f"""
+        SELECT ls.signature AS signature, ls.listing_id AS listing_id,
+               ls.source AS source, l.first_seen AS first_seen
+        FROM listing_source ls
+        JOIN listing l ON l.id = ls.listing_id
+        WHERE ls.signature IN ({placeholders})
+        ORDER BY l.first_seen ASC, ls.listing_id ASC
+        """,
+        signatures,
+    ).fetchall()
+    claims: dict[str, tuple[str, set[str]]] = {}
+    for row in rows:
+        signature = str(row["signature"])
+        listing_id = str(row["listing_id"])
+        source = str(row["source"])
+        if signature not in claims:
+            claims[signature] = (listing_id, set())
+        canonical_id, sources = claims[signature]
+        if listing_id == canonical_id:
+            sources.add(source)
+    return claims
+
+
 def _persist_stage(
     *,
     conn: sqlite3.Connection,
@@ -435,8 +542,20 @@ def _notify(
     if not new_scored:
         return
 
+    # scored is sorted by score descending (see _score_stage), so keeping the
+    # first occurrence per listing_id keeps the highest-scoring source's line
+    # when a cross-source duplicate resolved to a shared canonical listing_id.
+    seen_listing_ids: set[str] = set()
+    deduped_new_scored: list[tuple[_PersistableListing, ScoreResult]] = []
+    for persistable, result in new_scored:
+        listing_id = persistable.listing.identity.listing_id
+        if listing_id in seen_listing_ids:
+            continue
+        seen_listing_ids.add(listing_id)
+        deduped_new_scored.append((persistable, result))
+
     lines = ["New listings detected:"]
-    for persistable, result in new_scored[:10]:
+    for persistable, result in deduped_new_scored[:10]:
         lines.append(
             f"- {persistable.listing.identity.listing_id}: {result.score:.1f}/100 "
             f"({persistable.listing.identity.url})"
