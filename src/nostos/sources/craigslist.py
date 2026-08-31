@@ -28,6 +28,7 @@ from nostos.model import (
     SourceRecord,
 )
 from nostos.sources.base import Capabilities, Liveness
+from nostos.sources.http import RobotsDisallowedError, build_fetch_text
 
 CL_SOURCE_NAME = "craigslist"
 CL_BASE_DEFAULT = "https://vancouver.craigslist.org"
@@ -62,7 +63,12 @@ class CraigslistSource:
         fetch_text: Callable[[str], str] | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        self._fetch_text = fetch_text or _http_fetch_text
+        self._fetch_text = fetch_text or build_fetch_text(
+            self.capabilities,
+            user_agent=CL_USER_AGENT,
+            headers={"Accept-Language": "en-CA,en;q=0.9"},
+            timeout=30.0,
+        )
         self._now = now or _utc_now
 
     def discover(self, ctx: SearchContext) -> Iterator[SourceRecord]:
@@ -122,6 +128,8 @@ class CraigslistSource:
 
         try:
             rss_text = self._fetch_text(rss_url)
+        except RobotsDisallowedError:
+            return []
         except httpx.HTTPStatusError as exc:
             should_fallback_to_html = bool(
                 exc.response is not None and exc.response.status_code == 403
@@ -140,7 +148,10 @@ class CraigslistSource:
         html_query = dict(query)
         html_query.pop("format", None)
         html_url = f"{base_url}/search/{area}/apa?{urlencode(html_query)}"
-        html_text = self._fetch_text(html_url)
+        try:
+            html_text = self._fetch_text(html_url)
+        except RobotsDisallowedError:
+            return []
         return parse_cl_search_html(html_text, last_scan_iso)
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
@@ -828,17 +839,6 @@ def _infer_area_key(
 def _content_hash(payload: Mapping[str, Any]) -> str:
     normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-
-def _http_fetch_text(url: str) -> str:
-    response = httpx.get(
-        url,
-        headers={"User-Agent": CL_USER_AGENT, "Accept-Language": "en-CA,en;q=0.9"},
-        timeout=30.0,
-        follow_redirects=True,
-    )
-    response.raise_for_status()
-    return response.text
 
 
 def _utc_now() -> datetime:
