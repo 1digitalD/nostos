@@ -7,9 +7,12 @@
   <header class="detail-head">
     <h1>{{ row.title or row.address or row.listing_id }}</h1>
     <p class="detail-sub">
+      <span class="status-badge status-{{ row.match_status }}"
+            title="{{ {'match':'Meets all stated profile criteria','unverified':'Some criteria-relevant fields are unstated','miss':'Fails at least one criterion','excluded':'You marked this listing excluded'}[row.match_status] }}">
+        {% if row.match_status == 'match' %}✓ Match{% elif row.match_status == 'unverified' %}? Unverified{% elif row.match_status == 'miss' %}✕ Miss{% elif row.match_status == 'excluded' %}⊘ Excluded{% endif %}
+      </span>
       <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
       <span>Posted {{ row.posted_at | relativetime }}</span>
-      <span>Updated {{ row.posted_at | relativetime }}</span>
       <span>Listing ID: <code>{{ row.listing_id }}</code></span>
     </p>
   </header>
@@ -24,16 +27,36 @@
         <dt>Address</dt>
         <dd>{{ row.address or '—' }}</dd>
         <dt>Bedrooms</dt>
-        <dd>{% if row.beds is not none %}{{ row.beds }}{% else %}—{% endif %}</dd>
+        <dd>{% if row.beds is not none %}{{ row.beds | round(0, 'floor') | int }}{% else %}—{% endif %}</dd>
         <dt>Bathrooms</dt>
         <dd>{% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}</dd>
         <dt>Area</dt>
-        <dd>{% if row.area_value is not none %}{{ row.area_value }} {{ row.area_unit or '' }}{% else %}—{% endif %}</dd>
+        <dd>{% if row.area_value is not none %}{{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or '' }}{% else %}—{% endif %}</dd>
         <dt>Area key</dt>
         <dd>{{ row.area_label or '—' }}</dd>
         <dt>Original URL</dt>
-        <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">Open ↗</a></dd>
+        <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">{{ row.url }}</a></dd>
       </dl>
+
+      <div class="detail-facts">
+        {% set facts = row.facts_summary %}
+        <div class="detail-fact {% if facts.floor.present %}has{% else %}missing{% endif %}">
+          <span class="fact-k">Floor</span>
+          <span class="fact-v">{% if facts.floor.present %}{{ facts.floor.value }}{% else %}unstated{% endif %}</span>
+        </div>
+        <div class="detail-fact {% if facts.furnished.present %}has{% else %}missing{% endif %}">
+          <span class="fact-k">Furnished</span>
+          <span class="fact-v">{% if facts.furnished.present %}{{ facts.furnished.value }}{% else %}unstated{% endif %}</span>
+        </div>
+        <div class="detail-fact {% if facts.parking.present %}has{% else %}missing{% endif %}">
+          <span class="fact-k">Parking</span>
+          <span class="fact-v">{% if facts.parking.present %}{{ facts.parking.value }}{% else %}unstated{% endif %}</span>
+        </div>
+        <div class="detail-fact {% if facts.available.present %}has{% else %}missing{% endif %}">
+          <span class="fact-k">Available</span>
+          <span class="fact-v">{% if facts.available.present %}{{ facts.available.value }}{% else %}unstated{% endif %}</span>
+        </div>
+      </div>
 
       {% if row.photos %}
         <div class="photo-grid">
@@ -55,7 +78,7 @@
                   data-action="star"
                   data-listing="{{ row.listing_id }}"
                   {% if action_state.starred %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
-            ★ {% if action_state.starred %}Starred{% else %}Star{% endif %}
+            ★ {% if action_state.starred %}Shortlisted{% else %}Shortlist{% endif %}
           </button>
           <button type="button"
                   class="btn btn-dismiss {% if action_state.dismissed %}is-on{% endif %}"
@@ -70,6 +93,13 @@
                   data-listing="{{ row.listing_id }}"
                   {% if action_state.contacted %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
             ✉ {% if action_state.contacted %}Contacted{% else %}Mark contacted{% endif %}
+          </button>
+          <button type="button"
+                  class="btn btn-exclude {% if action_state.excluded %}is-on{% endif %}"
+                  data-action="excluded"
+                  data-listing="{{ row.listing_id }}"
+                  title="{% if action_state.excluded %}Click to remove from excluded{% else %}Auto-hide from the list{% endif %}">
+            ⊘ {% if action_state.excluded %}Excluded — click to undo{% else %}Exclude (auto-hide){% endif %}
           </button>
         </div>
         <form method="post" action="/listings/{{ row.listing_id }}/note" class="note-form" data-action-form>
@@ -101,19 +131,26 @@
   </div>
 
   <section class="explain-card">
-    <h2>Why this score?</h2>
-    {% if breakdown_contributors %}
-      <div class="breakdown-list">
-        {% for c in breakdown_contributors %}
-          <div class="breakdown-row {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">
-            <span class="contributor-label">{{ c.label }}</span>
-            <span class="breakdown-points {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">{{ '%+.1f'|format(c.contribution) }}</span>
+    <h2>Match breakdown</h2>
+    {% if category_scores %}
+      <div class="cat-scores">
+        {% for cat in category_scores %}
+          <div class="cat-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}">
+            <div class="cat-name">{{ cat.category }}</div>
+            <div class="cat-bar">
+              <div class="cat-bar-fill" style="width: {{ cat.pct | round(1) }}%"></div>
+            </div>
+            <div class="cat-val">
+              {% if cat.score > 0 %}+{% endif %}{{ cat.score | round(1) }}/{{ cat.max | round(1) }}
+            </div>
           </div>
         {% endfor %}
       </div>
-      <p class="breakdown-empty"><a href="/listings/{{ row.listing_id }}/explain.json" target="_blank" rel="noopener noreferrer">Raw JSON breakdown</a></p>
+      <p class="empty-small">
+        <a href="/listings/{{ row.listing_id }}/explain.json" target="_blank" rel="noopener noreferrer">Raw JSON breakdown</a>
+      </p>
     {% else %}
-      <p class="breakdown-empty">No score breakdown stored for this listing.</p>
+      <p class="empty-small">No score breakdown stored for this listing.</p>
     {% endif %}
   </section>
 </section>
@@ -142,9 +179,17 @@
         const star = btn.classList.contains('btn-star');
         const dismiss = btn.classList.contains('btn-dismiss');
         const contact = btn.classList.contains('btn-contact');
-        if (star) btn.textContent = !wasOn ? '★ Starred' : '★ Star';
+        const exclude = btn.classList.contains('btn-exclude');
+        if (star) btn.textContent = !wasOn ? '★ Shortlisted' : '★ Shortlist';
         else if (dismiss) btn.textContent = !wasOn ? '✕ Dismissed' : '✕ Dismiss';
         else if (contact) btn.textContent = !wasOn ? '✉ Contacted' : '✉ Mark contacted';
+        else if (exclude) {
+          btn.textContent = !wasOn ? '⊘ Excluded — click to undo' : '⊘ Exclude (auto-hide)';
+          if (wasOn) {
+            // Un-excluding: navigate home so the listing reappears
+            setTimeout(function () { window.location.href = '/'; }, 200);
+          }
+        }
       } else {
         btn.disabled = false;
       }

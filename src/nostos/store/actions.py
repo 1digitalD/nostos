@@ -1,10 +1,16 @@
-"""Listing action log: star, dismiss, contacted, note.
+"""Listing action log: star, dismiss, excluded, contacted, note.
 
 Append-only history of human-driven actions taken from the local web UI.
-Stored in the `listing_action` table introduced by migration 0002.
+Stored in the `listing_action` table (migrations 0002 + 0003).
 
-The web UI is the only writer in v0.2.0; the MCP server continues to expose
-the same ranked listings via the existing `list` and `explain` tools.
+'star'      = shortlist (keep for later review)
+'dismiss'   = "saw this, not for me" (kept, marked on the card)
+'excluded'  = "never show me this again" (auto-hides from the list view)
+'contacted' = already reached out (auto-hides from the list view)
+'note'      = free-text annotation
+
+The web UI is the writer; the MCP server continues to expose the same
+ranked listings via the existing `list` and `explain` tools.
 """
 
 from __future__ import annotations
@@ -14,9 +20,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-ActionKind = Literal["star", "dismiss", "contacted", "note"]
+ActionKind = Literal["star", "dismiss", "excluded", "contacted", "note"]
 
-_KIND_VALUES: tuple[str, ...] = ("star", "dismiss", "contacted", "note")
+_KIND_VALUES: tuple[str, ...] = ("star", "dismiss", "excluded", "contacted", "note")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +43,7 @@ class ActionRepo:
     # Non-note kinds are state flags, not a history. Re-recording the same
     # (listing_id, kind) is a no-op so the UI can submit idempotently without
     # producing duplicate rows. Notes remain append-only.
-    _FLAG_KINDS: frozenset[str] = frozenset({"star", "dismiss", "contacted"})
+    _FLAG_KINDS: frozenset[str] = frozenset({"star", "dismiss", "excluded", "contacted"})
 
     def record_action(
         self,

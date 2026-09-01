@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from nostos.config.profile import Profile, ScaledWeight
+from nostos.config.wizard import dump_profile_yaml
 from nostos.context import load_search_context
 from nostos.sources import (
     CraigslistSource,
@@ -260,6 +262,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             action_state = {
                 "starred": action_repo.has_action(listing_id=listing_id, kind="star"),
                 "dismissed": action_repo.has_action(listing_id=listing_id, kind="dismiss"),
+                "excluded": action_repo.has_action(listing_id=listing_id, kind="excluded"),
                 "contacted": action_repo.has_action(listing_id=listing_id, kind="contacted"),
             }
             breakdown = _score_breakdown(conn, listing_id=listing_id, profile_id=state.profile_id)
@@ -278,6 +281,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "action_state": action_state,
                 "breakdown": breakdown,
                 "breakdown_contributors": breakdown_contributors,
+                "category_scores": row.category_scores,
                 "profile_id": state.profile_id,
             },
         )
@@ -291,6 +295,14 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
     def dismiss_action(listing_id: str, state: StateDep) -> RedirectResponse:
         _record_action(state, listing_id, "dismiss")
         return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
+
+    @app.post("/listings/{listing_id}/excluded")
+    def excluded_action(listing_id: str, state: StateDep) -> RedirectResponse:
+        _record_action(state, listing_id, "excluded")
+        # Excluded listings are filtered out of the index by query_list, so
+        # redirecting home surfaces the remaining shortlist without the just-
+        # hidden listing.
+        return RedirectResponse(url="/", status_code=303)
 
     @app.post("/listings/{listing_id}/contacted")
     def contacted_action(listing_id: str, state: StateDep) -> RedirectResponse:
@@ -310,6 +322,54 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 raise HTTPException(status_code=400, detail=msg)
             _record_action(state, listing_id, "note", note=cleaned)
         return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
+
+    @app.get("/profile", response_class=HTMLResponse)
+    def profile_view(
+        request: Request,
+        state: StateDep,
+        saved: bool = False,
+        error: str | None = None,
+    ) -> HTMLResponse:
+        """Render the editable ranking-factors page from the active profile."""
+
+        profile = state.context.profile
+        form = _build_profile_form_data(profile)
+        return state.templates.TemplateResponse(
+            request=request,
+            name="profile.html",
+            context={
+                "form": form,
+                "profile_path": str(state.profile_path),
+                "saved": saved,
+                "error": error,
+                "profile_id": state.profile_id,
+            },
+        )
+
+    @app.post("/profile", response_class=HTMLResponse)
+    async def profile_save(
+        request: Request,
+        state: StateDep,
+    ) -> HTMLResponse:
+        """Apply form edits to the current profile and save back to disk."""
+
+        form_data = await request.form()
+        try:
+            new_profile = _apply_profile_form(state.context.profile, form_data)
+            _save_profile_yaml(state.profile_path, new_profile)
+        except (ValueError, KeyError, TypeError) as exc:
+            return profile_view(
+                request=request,
+                state=state,
+                saved=False,
+                error=str(exc),
+            )
+        return profile_view(
+            request=request,
+            state=state,
+            saved=True,
+            error=None,
+        )
 
     @app.get("/listings/{listing_id}/explain.json", response_class=JSONResponse)
     def explain_json(listing_id: str, state: StateDep) -> JSONResponse:
@@ -380,13 +440,13 @@ def _score_breakdown(
     }
 
 
-def _top_contributors(breakdown: Any, *, n: int = 2) -> list[dict[str, str | float]]:
-    """Return the top-n score contributors from a stored breakdown.
+def _top_contributors(breakdown: Any, *, n: int = 8) -> list[dict[str, float | str]]:
+    """Return the top-n individual score contributors from a stored breakdown.
 
     Each entry: ``{"label": str, "contribution": float, "rule_key": str}``.
-    Sorted by absolute contribution (impact) desc. Zero contributions
-    and non-numeric entries are filtered out so a card never wastes a row
-    on a rule that fired with zero weight.
+    Sorted by absolute contribution (impact) desc. Zero contributions are
+    filtered out so a card never wastes a row on a rule that fired with
+    zero weight.
     """
 
     if not isinstance(breakdown, Mapping):
@@ -395,7 +455,7 @@ def _top_contributors(breakdown: Any, *, n: int = 2) -> list[dict[str, str | flo
     if not isinstance(contributions, list):
         return []
 
-    valid: list[dict[str, str | float]] = []
+    valid: list[dict[str, float | str]] = []
     for entry in contributions:
         if not isinstance(entry, Mapping):
             continue
@@ -414,6 +474,8 @@ def _top_contributors(breakdown: Any, *, n: int = 2) -> list[dict[str, str | flo
         )
     valid.sort(key=lambda item: abs(float(item["contribution"])), reverse=True)
     return valid[:n]
+
+
 
 
 def _filter_chips(
@@ -448,10 +510,7 @@ def _filter_chips(
         label = label_fn(filters)
         remove_url = _url_without_param(filters, param)
         chips.append({"label": label, "param": param, "remove_url": remove_url})
-    chips_list: list[dict[str, str | float]] = []
-    for chip in chips:
-        chips_list.append({**chip})
-    return chips_list  # type: ignore[return-value]
+    return chips
 
 
 def _url_without_param(filters: ListFilter, param: str) -> str:
@@ -479,10 +538,10 @@ def _url_without_param(filters: ListFilter, param: str) -> str:
 
 def _contributors_by_listing(
     conn: Any, *, listing_ids: tuple[str, ...], profile_id: str, n: int = 2
-) -> dict[str, list[dict[str, str | float]]]:
+) -> dict[str, list[dict[str, float | str]]]:
     """Pre-compute top-n contributors for many listings in one pass."""
 
-    result: dict[str, list[dict[str, str | float]]] = {}
+    result: dict[str, list[dict[str, float | str]]] = {}
     for listing_id in listing_ids:
         bd = _score_breakdown(conn, listing_id=listing_id, profile_id=profile_id)
         if bd is None:
@@ -493,6 +552,117 @@ def _contributors_by_listing(
             result[str(listing_id)] = contributors
     return result
 
+
+
+def _build_profile_form_data(profile: Profile) -> dict[str, object]:
+    """Shape the active profile into a form-friendly dict for the profile page."""
+
+    hard = profile.hard
+    beds_eq = hard.beds.eq if hard.beds else None
+    beds_min = hard.beds.min if hard.beds else None
+    baths_min = hard.baths.min if hard.baths else None
+    baths_max = hard.baths.max if hard.baths else None
+
+    weights: list[dict[str, object]] = []
+    for rule_key, value in profile.weights.items():
+        scalar = int(value.cap) if isinstance(value, ScaledWeight) else int(value)
+        weights.append({"rule_key": rule_key, "label": rule_key, "value": scalar})
+
+    sources: list[dict[str, object]] = []
+    for source_key in sorted(profile.sources.keys()):
+        sources.append({
+            "key": source_key,
+            "label": source_key,
+            "enabled": bool(profile.sources[source_key]),
+        })
+
+    return {
+        "hard": {
+            "rent_max": hard.rent.max if hard.rent else None,
+            "beds_eq": beds_eq,
+            "beds_min": beds_min,
+            "baths_min": baths_min,
+            "baths_max": baths_max,
+            "area_min": hard.area.min if hard.area else None,
+        },
+        "weights": weights,
+        "sources": sources,
+    }
+
+
+def _apply_profile_form(profile: Profile, form_data: Any) -> Profile:
+    """Return a new Profile with form fields applied; preserve everything else."""
+
+    payload = profile.model_dump(mode="json")
+
+    hard = dict(payload.get("hard") or {})
+    rent_max_raw = form_data.get("rent_max")
+    hard["rent"] = (
+        {"max": _coerce_float(rent_max_raw), "currency": "CAD"} if rent_max_raw else None
+    )
+    beds_eq = _coerce_float(form_data.get("beds_eq"))
+    beds_min = _coerce_float(form_data.get("beds_min"))
+    if beds_eq is not None or beds_min is not None:
+        hard["beds"] = {"eq": beds_eq, "min": beds_min, "max": None}
+    else:
+        hard["beds"] = None
+    baths_min = _coerce_float(form_data.get("baths_min"))
+    baths_max = _coerce_float(form_data.get("baths_max"))
+    if baths_min is not None or baths_max is not None:
+        hard["baths"] = {"min": baths_min, "max": baths_max}
+    else:
+        hard["baths"] = None
+    area_min = _coerce_float(form_data.get("area_min"))
+    hard["area"] = (
+        {"min": area_min, "unit": "sqft"} if area_min is not None else None
+    )
+    payload["hard"] = hard
+
+    weights = dict(payload.get("weights") or {})
+    for rule_key in list(weights.keys()):
+        form_key = f"weight_{rule_key}"
+        if form_key not in form_data:
+            continue
+        new_value = _coerce_float(form_data.get(form_key))
+        if new_value is None:
+            continue
+        existing = weights[rule_key]
+        if isinstance(existing, dict):
+            weights[rule_key] = {**existing, "cap": int(new_value)}
+        else:
+            weights[rule_key] = int(new_value)
+    payload["weights"] = weights
+
+    sources = dict(payload.get("sources") or {})
+    for source_key in list(sources.keys()):
+        sources[source_key] = form_data.get(f"src_{source_key}") is not None
+    payload["sources"] = sources
+
+    return Profile.model_validate(payload)
+
+
+def _save_profile_yaml(path: Path, profile: Profile) -> None:
+    """Atomically write the profile to disk (tmp + rename)."""
+
+    text_yaml = dump_profile_yaml(profile.model_dump(mode="json"))
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text_yaml, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Convert a form field to float, returning None for empty/malformed."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 __all__ = [
     "AppState",

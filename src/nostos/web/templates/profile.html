@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Ranking factors · Nostos{% endblock %}
+{% block content %}
+<a class="back" href="/">← All listings</a>
+
+<section class="profile-card">
+  <header class="profile-head">
+    <h1>⚙ Ranking factors</h1>
+    <p class="profile-sub">
+      These are the criteria your match scores are computed from. Edit and
+      save — then re-run <code>nostos watch --yes</code> to apply the new weights
+      to existing listings.
+    </p>
+  </header>
+
+  {% if saved %}
+    <div class="profile-banner profile-banner-ok">
+      Profile saved to <code>{{ profile_path }}</code>. Run
+      <code>nostos watch --yes</code> to re-score existing listings with the new weights.
+    </div>
+  {% elif error %}
+    <div class="profile-banner profile-banner-err">
+      Could not save profile: {{ error }}
+    </div>
+  {% endif %}
+
+  <form method="post" action="/profile" class="profile-form">
+    <fieldset class="profile-section">
+      <legend>Hard filters</legend>
+      <p class="profile-hint">Listings that fail any of these are filtered out by default. Leave blank to allow any value.</p>
+      <div class="profile-grid">
+        <label>
+          Rent max (CAD/mo)
+          <input type="number" name="rent_max" step="50" min="0"
+                 value="{{ form.hard.rent_max }}">
+        </label>
+        <label>
+          Beds (exact, or leave blank)
+          <input type="number" name="beds_eq" step="1" min="0"
+                 value="{{ form.hard.beds_eq }}">
+        </label>
+        <label>
+          Beds min
+          <input type="number" name="beds_min" step="1" min="0"
+                 value="{{ form.hard.beds_min }}">
+        </label>
+        <label>
+          Baths min
+          <input type="number" name="baths_min" step="0.5" min="0"
+                 value="{{ form.hard.baths_min }}">
+        </label>
+        <label>
+          Baths max
+          <input type="number" name="baths_max" step="0.5" min="0"
+                 value="{{ form.hard.baths_max }}">
+        </label>
+        <label>
+          Area min (sqft)
+          <input type="number" name="area_min" step="10" min="0"
+                 value="{{ form.hard.area_min }}">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset class="profile-section">
+      <legend>Weights</legend>
+      <p class="profile-hint">Per-rule point values. Positive = more of this rule increases the score; negative = it decreases.</p>
+      <div class="profile-weights">
+        {% for w in form.weights %}
+          <label>
+            <span class="weight-name">{{ w.label }}</span>
+            <span class="weight-rule">{{ w.rule_key }}</span>
+            <input type="number" name="weight_{{ w.rule_key }}" step="1"
+                   value="{{ w.value }}">
+          </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+
+    <fieldset class="profile-section">
+      <legend>Sources</legend>
+      <p class="profile-hint">Disable a source to skip it during watch.</p>
+      <div class="profile-sources">
+        {% for src in form.sources %}
+          <label>
+            <input type="checkbox" name="src_{{ src.key }}"
+                   {% if src.enabled %}checked{% endif %}>
+            {{ src.label }}
+          </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+
+    <div class="profile-actions">
+      <button type="submit">Save</button>
+      <a class="reset" href="/">Cancel</a>
+      <span class="profile-path">profile: <code>{{ profile_path }}</code></span>
+    </div>
+  </form>
+</section>
+{% endblock %}

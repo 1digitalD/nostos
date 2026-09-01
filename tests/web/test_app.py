@@ -173,8 +173,8 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     assert "Sunny 2BR in Kitsilano" in body
     assert f'href="/listings/{listing_id}"' in body
     # No badges before any actions.
-    assert "row-starred" not in body
-    assert "badge-star" not in body
+    assert "card is-starred" not in body
+    assert "action-btn is-on" not in body
 
     # Detail page renders score, address, action buttons, no badges yet.
     resp = client.get(f"/listings/{listing_id}")
@@ -189,7 +189,7 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     assert f"data-listing=\"{listing_id}\"" in body
     assert "Action history" in body
     # Buttons in default text (not 'is-on' class).
-    assert "★ Star" in body
+    assert "★ Shortlist" in body
     # No button has the 'is-on' modifier class on initial render.
     # The literal string 'is-on' may appear in inline JS, so check for the
     # class-attribute pattern only.
@@ -214,8 +214,8 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     # Detail page now reflects the starred state.
     resp = client.get(f"/listings/{listing_id}")
     body = resp.text
-    assert "★ Starred" in body
-    assert 'class="btn btn-star is-on"' in body
+    assert "★ Shortlisted" in body
+    assert 'btn-star is-on' in body
     assert "aria-pressed=\"true\"" in body
 
     # List view shows the starred state on the card.
