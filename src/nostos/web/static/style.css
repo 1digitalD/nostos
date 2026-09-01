@@ -198,6 +198,7 @@ button { font: inherit; }
 .card {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -223,11 +224,14 @@ button { font: inherit; }
 .card-photo-wrap {
   position: relative;
   display: block;
-  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
   background: #ece9df;
   aspect-ratio: var(--photo-aspect, 4 / 3);
   max-height: 360px;
   overflow: hidden;
+  word-break: break-all;
 }
 
 /* Compact fallback when a photo fails to load (CL CDN URL expired, etc.) or
