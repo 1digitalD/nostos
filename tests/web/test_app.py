@@ -183,11 +183,19 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     assert "Sunny 2BR in Kitsilano" in body
     assert "1234 West 4th Ave, Kitsilano" in body
     assert "score-good" in body  # 82.5 >= 75
-    assert f"/listings/{listing_id}/star" in body
+    # One-click actions are wired via data-action, not form actions.
+    assert 'data-action="star"' in body
+    assert 'data-listing="' in body
+    assert f"data-listing=\"{listing_id}\"" in body
     assert "Action history" in body
     # Buttons in default text (not 'is-on' class).
     assert "★ Star" in body
-    assert "is-on" not in body
+    # No button has the 'is-on' modifier class on initial render.
+    # The literal string 'is-on' may appear in inline JS, so check for the
+    # class-attribute pattern only.
+    assert 'class="btn btn-star is-on"' not in body
+    assert 'class="btn btn-dismiss is-on"' not in body
+    assert 'class="btn btn-contact is-on"' not in body
 
     # POST star -> 303 + a row in the DB.
     resp = client.post(f"/listings/{listing_id}/star", follow_redirects=False)
@@ -210,11 +218,14 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     assert 'class="btn btn-star is-on"' in body
     assert "aria-pressed=\"true\"" in body
 
-    # List view badge appears after the action.
+    # List view shows the starred state on the card.
     resp = client.get("/")
     body = resp.text
-    assert "row-starred" in body
-    assert "badge-star" in body
+    assert "is-starred" in body
+    # The star button on the card carries the is-on modifier.
+    assert 'data-action="star"' in body
+    assert 'data-listing="craigslist:seed-1"' in body
+    assert 'class="action-btn is-on"' in body
 
 
 def test_post_note_is_recorded_and_truncated(tmp_path: Path) -> None:
