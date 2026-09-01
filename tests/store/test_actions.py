@@ -95,18 +95,44 @@ def test_check_constraint_rejects_unknown_kind(tmp_path: Path) -> None:
             )
 
 
-def test_multiple_actions_of_same_kind_are_allowed(tmp_path: Path) -> None:
+def test_flag_kinds_are_idempotent(tmp_path: Path) -> None:
+    _, repo = _seed_db(tmp_path)
+    base = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    ids: list[int] = []
+    for offset in range(3):
+        ids.append(
+            repo.record_action(
+                listing_id="listing-1",
+                kind="star",
+                created_at=base + timedelta(minutes=offset),
+            )
+        )
+    # Re-recording a flag kind returns the original id and does not add a row.
+    assert ids[0] == ids[1] == ids[2]
+    actions = repo.get_actions(listing_id="listing-1")
+    assert len(actions) == 1
+    assert actions[0].kind == "star"
+    # Newest first by created_at.
+    assert actions[0].created_at == base
+
+
+def test_note_kinds_remain_append_only(tmp_path: Path) -> None:
     _, repo = _seed_db(tmp_path)
     base = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     for offset in range(3):
         repo.record_action(
             listing_id="listing-1",
-            kind="star",
+            kind="note",
+            note=f"note {offset}",
             created_at=base + timedelta(minutes=offset),
         )
-
     actions = repo.get_actions(listing_id="listing-1")
     assert len(actions) == 3
-    assert all(item.kind == "star" for item in actions)
-    # Newest first.
+    assert all(item.kind == "note" for item in actions)
     assert actions[0].created_at > actions[-1].created_at
+
+
+def test_record_action_rejects_unknown_kind(tmp_path: Path) -> None:
+    _, repo = _seed_db(tmp_path)
+    with pytest.raises(ValueError, match="unknown listing_action kind"):
+        repo.record_action(listing_id="listing-1", kind="bogus")  # type: ignore[arg-type]

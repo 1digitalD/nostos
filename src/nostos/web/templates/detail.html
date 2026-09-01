@@ -56,18 +56,24 @@
         <h2>Actions</h2>
         <div class="action-buttons">
           <form method="post" action="/listings/{{ row.listing_id }}/star">
-            <button type="submit" class="btn btn-star">★ Star</button>
+            <button type="submit" class="btn btn-star {% if action_state.starred %}is-on{% endif %}"{% if action_state.starred %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
+              ★ {% if action_state.starred %}Starred{% else %}Star{% endif %}
+            </button>
           </form>
           <form method="post" action="/listings/{{ row.listing_id }}/dismiss">
-            <button type="submit" class="btn btn-dismiss">✕ Dismiss</button>
+            <button type="submit" class="btn btn-dismiss {% if action_state.dismissed %}is-on{% endif %}"{% if action_state.dismissed %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
+              ✕ {% if action_state.dismissed %}Dismissed{% else %}Dismiss{% endif %}
+            </button>
           </form>
           <form method="post" action="/listings/{{ row.listing_id }}/contacted">
-            <button type="submit" class="btn btn-contact">✉ Contacted</button>
+            <button type="submit" class="btn btn-contact {% if action_state.contacted %}is-on{% endif %}"{% if action_state.contacted %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
+              ✉ {% if action_state.contacted %}Contacted{% else %}Mark contacted{% endif %}
+            </button>
           </form>
         </div>
         <form method="post" action="/listings/{{ row.listing_id }}/note" class="note-form">
           <label for="note">Add a note</label>
-          <textarea id="note" name="note" rows="3" placeholder="e.g. viewing scheduled Thursday 6pm"></textarea>
+          <textarea id="note" name="note" rows="3" maxlength="4000" placeholder="e.g. viewing scheduled Thursday 6pm"></textarea>
           <button type="submit" class="btn btn-note">Save note</button>
         </form>
       </section>

@@ -717,6 +717,30 @@ def web_command(
             help="Skip auto-opening the browser when serving (serve mode only).",
         ),
     ] = False,
+    filter_rent_max: Annotated[
+        float | None,
+        typer.Option(
+            "--filter-rent-max",
+            min=0,
+            help="Export filter: max rent (export only).",
+        ),
+    ] = None,
+    filter_score_min: Annotated[
+        float | None,
+        typer.Option(
+            "--filter-score-min",
+            min=0,
+            max=100,
+            help="Export filter: minimum score (export only).",
+        ),
+    ] = None,
+    filter_source: Annotated[
+        str | None,
+        typer.Option(
+            "--filter-source",
+            help="Export filter: source name (export only).",
+        ),
+    ] = None,
 ) -> None:
     """Browse and act on ranked listings through a local web UI.
 
@@ -731,6 +755,7 @@ def web_command(
       nostos web
       nostos web --port 9000
       nostos web --export ~/Desktop/listings.html
+      nostos web --export ~/Desktop/top.html --filter-rent-max 2800 --filter-score-min 70
       nostos web --host 0.0.0.0 --port 8421
     """
 
@@ -748,13 +773,18 @@ def web_command(
     if export is not None:
         from nostos.web.query import query_list
 
+        export_filters = ListFilter(
+            rent_max=filter_rent_max,
+            score_min=filter_score_min,
+            source=filter_source,
+        )
         with connect(db_path) as conn:
             rows = query_list(
                 conn,
                 context=context,
                 profile_id=profile_id,
                 sources=source_objects,
-                filters=ListFilter(),
+                filters=export_filters,
             )
         from nostos.web.static_export import write_static_export
 
@@ -795,6 +825,7 @@ def web_command(
     typer.echo(f"citypack_path={citypack_path}")
     typer.echo(f"profile_id={profile_id}")
     typer.echo(f"url=http://{host}:{port}/")
+    typer.echo("Press Ctrl+C to stop the server.")
     url = f"http://{host}:{port}/"
     if not no_browser:
         try:

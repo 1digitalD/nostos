@@ -34,6 +34,11 @@ class ActionRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    # Non-note kinds are state flags, not a history. Re-recording the same
+    # (listing_id, kind) is a no-op so the UI can submit idempotently without
+    # producing duplicate rows. Notes remain append-only.
+    _FLAG_KINDS: frozenset[str] = frozenset({"star", "dismiss", "contacted"})
+
     def record_action(
         self,
         *,
@@ -42,6 +47,13 @@ class ActionRepo:
         note: str | None = None,
         created_at: datetime | None = None,
     ) -> int:
+        if kind not in _KIND_VALUES:
+            msg = f"unknown listing_action kind: {kind!r}"
+            raise ValueError(msg)
+        if kind in self._FLAG_KINDS:
+            existing = self._existing_id(listing_id=listing_id, kind=kind)
+            if existing is not None:
+                return existing
         timestamp = created_at or datetime.now(tz=UTC)
         cursor = self._conn.execute(
             """
@@ -55,6 +67,18 @@ class ActionRepo:
             msg = "listing_action insert did not return a row id"
             raise RuntimeError(msg)
         return int(inserted_id)
+
+    def _existing_id(self, *, listing_id: str, kind: str) -> int | None:
+        row = self._conn.execute(
+            """
+            SELECT id FROM listing_action
+            WHERE listing_id = ? AND kind = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (listing_id, kind),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
 
     def get_actions(self, *, listing_id: str) -> list[ListingAction]:
         rows = self._conn.execute(
@@ -81,6 +105,28 @@ class ActionRepo:
             (listing_id, kind),
         ).fetchone()
         return row is not None
+
+    def action_states_for(
+        self, *, listing_ids: tuple[str, ...]
+    ) -> dict[str, dict[str, bool]]:
+        """Return per-listing flag-kind state for many listings in one query."""
+
+        if not listing_ids:
+            return {}
+        placeholders = ",".join("?" for _ in listing_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT listing_id, kind
+            FROM listing_action
+            WHERE listing_id IN ({placeholders})
+              AND kind IN ('star', 'dismiss', 'contacted')
+            """,
+            listing_ids,
+        ).fetchall()
+        states: dict[str, dict[str, bool]] = {}
+        for row in rows:
+            states.setdefault(str(row["listing_id"]), {})[str(row["kind"])] = True
+        return states
 
 
 def _row_to_action(row: sqlite3.Row) -> ListingAction:

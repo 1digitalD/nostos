@@ -35,6 +35,16 @@ from nostos.web.query import (
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# Maximum length for a note saved through the web UI. Notes are free-form text
+# but unbounded length is a foot-gun (large DB rows, slow renders). The cap is
+# generous so legitimate notes still fit comfortably.
+_MAX_NOTE_LEN = 4000
+
+# Acceptable sort keys. Anything else falls back to "score" rather than 422 —
+# invalid input is silently ignored so a stale bookmark or hand-crafted link
+# cannot break the page.
+_VALID_SORT_KEYS: frozenset[str] = frozenset({"score", "rent", "posted", "address"})
+
 
 
 def _build_templates() -> Jinja2Templates:
@@ -181,6 +191,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
         area_name: str | None = Query(default=None),
         sort: str = Query(default="score"),
     ) -> HTMLResponse:
+        normalized_sort = sort if sort in _VALID_SORT_KEYS else "score"
         filters = ListFilter(
             rent_min=rent_min,
             rent_max=rent_max,
@@ -190,7 +201,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             score_min=score_min,
             source=source or None,
             area_name=area_name or None,
-            sort=sort,
+            sort=normalized_sort,
         )
         with state.connect() as conn:
             rows = query_list(
@@ -200,12 +211,16 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 sources=state.sources,
                 filters=filters,
             )
+            row_actions = _row_action_states(
+                conn, listing_ids=tuple(row.listing_id for row in rows)
+            )
 
         return state.templates.TemplateResponse(
             request=request,
             name="list.html",
             context={
                 "rows": rows,
+                "row_actions": row_actions,
                 "filters": filters,
                 "active_filters": _active_filters(filters),
                 "areas": known_areas(state.context),
@@ -230,7 +245,13 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             )
             if row is None:
                 raise HTTPException(status_code=404, detail="Listing not found")
-            actions = ActionRepo(conn).get_actions(listing_id=listing_id)
+            action_repo = ActionRepo(conn)
+            actions = action_repo.get_actions(listing_id=listing_id)
+            action_state = {
+                "starred": action_repo.has_action(listing_id=listing_id, kind="star"),
+                "dismissed": action_repo.has_action(listing_id=listing_id, kind="dismiss"),
+                "contacted": action_repo.has_action(listing_id=listing_id, kind="contacted"),
+            }
             breakdown = _score_breakdown(conn, listing_id=listing_id, profile_id=state.profile_id)
 
         return state.templates.TemplateResponse(
@@ -240,6 +261,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "row": row,
                 "listing_id": listing_id,
                 "actions": actions,
+                "action_state": action_state,
                 "breakdown": breakdown,
                 "profile_id": state.profile_id,
             },
@@ -268,6 +290,9 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
     ) -> RedirectResponse:
         cleaned = note.strip()
         if cleaned:
+            if len(cleaned) > _MAX_NOTE_LEN:
+                msg = f"Note too long ({len(cleaned)} chars); cap is {_MAX_NOTE_LEN}."
+                raise HTTPException(status_code=400, detail=msg)
             _record_action(state, listing_id, "note", note=cleaned)
         return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
 
@@ -309,6 +334,14 @@ def _active_filters(filters: ListFilter) -> dict[str, object]:
         if value is not None:
             pairs[name] = value
     return pairs
+
+
+def _row_action_states(
+    conn: Any, *, listing_ids: tuple[str, ...]
+) -> dict[str, dict[str, bool]]:
+    """Return {listing_id: {starred: bool, dismissed: bool, contacted: bool}}."""
+
+    return ActionRepo(conn).action_states_for(listing_ids=listing_ids)
 
 
 def _score_breakdown(

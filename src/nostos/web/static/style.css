@@ -327,6 +327,38 @@ button:hover {
 .btn-contact { background: #d8e1f0; }
 .btn-note { background: var(--note-bg); }
 
+/* Active state for flag-kind action buttons. */
+.btn.is-on {
+  font-weight: 600;
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+.btn:disabled {
+  cursor: default;
+  opacity: 0.95;
+}
+
+/* Action badges shown on the list view. */
+.row-badges {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 4px;
+  vertical-align: middle;
+}
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #fff;
+}
+.badge-star    { background: var(--accent); }
+.badge-dismiss { background: var(--low); }
+.badge-contact { background: var(--source-cl); }
+.row-starred   { background: #f4f9f4; }
+.row-dismissed { background: #fbf0f0; opacity: 0.7; }
+
 .note-form {
   display: flex;
   flex-direction: column;

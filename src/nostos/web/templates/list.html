@@ -88,7 +88,8 @@
       </thead>
       <tbody>
         {% for row in rows %}
-          <tr>
+          {% set action_state = row_actions.get(row.listing_id, {}) %}
+          <tr class="{% if action_state.star %}row-starred{% elif action_state.dismiss %}row-dismissed{% endif %}">
             <td>
               {% if row.primary_photo %}
                 <img class="thumb" src="{{ row.primary_photo.url }}" alt="" loading="lazy">
@@ -103,6 +104,13 @@
               </a>
               {% if row.address %}
                 <div class="row-address">{{ row.address }}</div>
+              {% endif %}
+              {% if action_state.star or action_state.dismiss or action_state.contact %}
+                <div class="row-badges">
+                  {% if action_state.star %}<span class="badge badge-star" title="starred">★</span>{% endif %}
+                  {% if action_state.dismiss %}<span class="badge badge-dismiss" title="dismissed">✕</span>{% endif %}
+                  {% if action_state.contact %}<span class="badge badge-contact" title="contacted">✉</span>{% endif %}
+                </div>
               {% endif %}
             </td>
             <td><span class="source-tag source-{{ row.source }}">{{ row.source }}</span></td>
