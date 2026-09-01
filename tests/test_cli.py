@@ -28,6 +28,7 @@ from nostos.sources.base import Capabilities, Liveness
         (["rank", "--help"],),
         (["list", "--help"],),
         (["explain", "--help"],),
+        (["web", "--help"],),
     ],
 )
 def test_help_commands_exit_zero(argv: list[str]) -> None:
@@ -35,6 +36,63 @@ def test_help_commands_exit_zero(argv: list[str]) -> None:
     result = runner.invoke(cli_module.app, argv)
     assert result.exit_code == 0
     assert "Examples:" in result.stdout
+
+
+def test_web_export_writes_static_html(tmp_path: Path) -> None:
+    from nostos.store.db import apply_migrations, connect
+    from nostos.store.repo import ListingRepo, ScoreRepo
+
+    citypack_path = _write_citypack(tmp_path / "citypack.yaml", source_name="craigslist")
+    profile_path = _write_profile(
+        tmp_path / "profile.yaml", laundry_weight=1.0, source_name="craigslist"
+    )
+    db_path = tmp_path / "nostos.db"
+
+    rec = SourceRecord(
+        source="craigslist",
+        source_id="abc",
+        url="https://example.com/abc",
+        payload={"title": "Loft near the seawall", "price": 2400, "beds": 2, "baths": 1},
+        content_hash="h",
+        fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    profile_id = profile_path.stem
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        listing_repo = ListingRepo(conn)
+        listing_repo.ensure_listing("craigslist:abc")
+        listing_repo.add_source_record(listing_id="craigslist:abc", record=rec)
+        ScoreRepo(conn).upsert_score(
+            listing_id="craigslist:abc",
+            profile_id=profile_id,
+            score=70.0,
+            breakdown_json={"score": 70.0},
+            computed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    output = tmp_path / "export.html"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "web",
+            "--db", str(db_path),
+            "--profile", str(profile_path),
+            "--citypack", str(citypack_path),
+            "--export", str(output),
+            "--filter-rent-max", "3000",
+            "--filter-score-min", "50",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert output.exists()
+    body = output.read_text(encoding="utf-8")
+    assert body.lower().startswith("<!doctype html>")
+    # Self-contained: no POST endpoints wired.
+    assert "/star" not in body
+    # Profile id + listing title are rendered into the JSON payload.
+    assert profile_id in body
+    assert "Loft near the seawall" in body
 
 
 def test_init_non_interactive_writes_profile_and_refuses_to_clobber(tmp_path: Path) -> None:

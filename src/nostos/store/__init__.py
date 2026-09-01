@@ -1,3 +1,4 @@
+from nostos.store.actions import ActionKind, ActionRepo, ListingAction
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import (
     ListingRepo,
@@ -8,6 +9,9 @@ from nostos.store.repo import (
 )
 
 __all__ = [
+    "ActionKind",
+    "ActionRepo",
+    "ListingAction",
     "ListingRepo",
     "ObservationRepo",
     "RunRepo",

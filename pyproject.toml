@@ -13,12 +13,15 @@ authors = [{ name = "Nostos Contributors" }]
 dependencies = [
   "apprise",
   "extruct>=0.18.0",
+  "fastapi>=0.141.1",
   "httpx>=0.28.1",
+  "jinja2>=3.1.6",
   "mcp>=2.1.1",
   "protego>=0.6.2",
   "pydantic>=2.13.4",
   "selectolax>=0.4.11",
   "typer",
+  "uvicorn[standard]>=0.52.4",
 ]
 
 [project.urls]
@@ -32,6 +35,7 @@ nostos-mcp = "nostos.mcp.server:main"
 
 [dependency-groups]
 dev = [
+  "httpx>=0.28.1",
   "mypy",
   "pytest",
   "ruff",

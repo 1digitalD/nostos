@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from nostos.model.listing import Origin
 from nostos.model.source_record import JSONValue
 from nostos.store.db import apply_migrations, connect
@@ -15,7 +17,7 @@ def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None
     db_path = tmp_path / "nostos.db"
     with connect(db_path) as conn:
         applied = apply_migrations(conn)
-        assert applied == [1]
+        assert applied == [1, 2]
         assert apply_migrations(conn) == []
 
         table_names = {
@@ -34,7 +36,55 @@ def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None
         "score",
         "user_state",
         "run",
+        "listing_action",
     }.issubset(table_names)
+
+
+def test_listing_action_table_accepts_record_and_check_constraint(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        listing_repo = ListingRepo(conn)
+        listing_repo.ensure_listing("listing-1")
+        observed_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        conn.execute(
+            """
+            INSERT INTO listing_action(listing_id, kind, note, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("listing-1", "star", None, observed_at.isoformat()),
+        )
+        conn.execute(
+            """
+            INSERT INTO listing_action(listing_id, kind, note, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("listing-1", "note", "looked promising", observed_at.isoformat()),
+        )
+
+        rows = conn.execute(
+            """
+            SELECT listing_id, kind, note, created_at
+            FROM listing_action
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["kind"] == "star"
+        assert rows[1]["kind"] == "note"
+        assert rows[1]["note"] == "looked promising"
+
+        # CHECK constraint should reject unknown kind values.
+        import sqlite3 as _sqlite3
+
+        with pytest.raises(_sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO listing_action(listing_id, kind, note, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("listing-1", "bogus", None, observed_at.isoformat()),
+            )
 
 
 def test_observation_projection_prefers_highest_precedence_origin(tmp_path: Path) -> None:
