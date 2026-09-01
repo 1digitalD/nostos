@@ -101,7 +101,8 @@
                  alt="{{ photo.caption or '' }}"
                  loading="lazy"
                  width="{{ photo.width or '' }}"
-                 height="{{ photo.height or '' }}">
+                 height="{{ photo.height or '' }}"
+                 onerror="this.parentElement.classList.add('photo-failed'); this.remove();">
           {% else %}
             <div class="card-photo card-photo-none">no photo</div>
           {% endif %}

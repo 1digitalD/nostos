@@ -230,6 +230,28 @@ button { font: inherit; }
   overflow: hidden;
 }
 
+/* Compact fallback when a photo fails to load (CL CDN URL expired, etc.) or
+   when the listing has no photo at all. */
+.card-photo-wrap.photo-failed,
+.card-photo-wrap:has(.card-photo-none) {
+  aspect-ratio: auto;
+  min-height: 80px;
+  max-height: 120px;
+}
+
+.card-photo-wrap.photo-failed::after,
+.card-photo-wrap:has(.card-photo-none)::after {
+  content: 'no photo';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .card-photo {
   width: 100%;
   height: 100%;
