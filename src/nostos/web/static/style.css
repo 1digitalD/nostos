@@ -960,3 +960,105 @@ button { font: inherit; }
   align-items: center;
   gap: 10px;
 }
+
+
+/* ---------- card action buttons (in card body, not photo overlay) ---------- */
+
+.card-actions-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.card-action-btn {
+  flex: 1 1 auto;
+  min-width: 80px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  font-family: inherit;
+}
+
+.card-action-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.card-action-btn.is-on {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.card-action-btn.is-on:hover {
+  background: #1f5c3d;
+  color: white;
+}
+
+.card-action-exclude.is-on {
+  background: var(--low);
+  border-color: var(--low);
+}
+
+.card-action-exclude.is-on:hover {
+  background: #6b2929;
+}
+
+.card-action-view {
+  /* external link variant: same shape, slightly muted */
+}
+
+/* ---------- profile summary strip (above the filter form) ---------- */
+
+.profile-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 0 14px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-summary-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.profile-summary-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.profile-summary-edit {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.profile-summary-edit:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}

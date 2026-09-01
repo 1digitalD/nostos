@@ -224,6 +224,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 n=2,
             )
             filter_chips = _filter_chips(filters, known_areas(state.context))
+            profile_summary = _profile_summary(state.context.profile)
 
         return state.templates.TemplateResponse(
             request=request,
@@ -235,6 +236,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "filters": filters,
                 "active_filters": _active_filters(filters),
                 "filter_chips": filter_chips,
+                "profile_summary": profile_summary,
                 "areas": known_areas(state.context),
                 "sources": known_sources(state.sources.values()),
                 "profile_id": state.profile_id,
@@ -510,6 +512,41 @@ def _filter_chips(
         label = label_fn(filters)
         remove_url = _url_without_param(filters, param)
         chips.append({"label": label, "param": param, "remove_url": remove_url})
+    return chips
+
+def _profile_summary(profile: Profile) -> list[str]:
+    """Render the active profile's hard filters as a row of inline chips.
+
+    Surfaces WHAT the ranking uses (rent.max, beds, baths, area.min,
+    enabled sources) — the user should see these at a glance and have a
+    single click to edit them.
+    """
+
+    chips: list[str] = []
+    hard = profile.hard
+    if hard.rent is not None and hard.rent.max is not None:
+        chips.append(f"rent ≤ ${int(hard.rent.max):,}")
+    if hard.beds is not None:
+        if hard.beds.eq is not None:
+            chips.append(f"{int(hard.beds.eq)} bd exactly")
+        elif hard.beds.min is not None:
+            chips.append(f"≥ {int(hard.beds.min)} bd")
+    if hard.baths is not None:
+        if hard.baths.eq is not None:
+            chips.append(f"{hard.baths.eq} ba exactly")
+        else:
+            bits: list[str] = []
+            if hard.baths.min is not None:
+                bits.append(f"≥ {hard.baths.min}")
+            if hard.baths.max is not None:
+                bits.append(f"≤ {hard.baths.max}")
+            if bits:
+                chips.append("ba " + " ".join(bits))
+    if hard.area is not None and hard.area.min is not None:
+        chips.append(f"≥ {int(hard.area.min)} {hard.area.unit}")
+    enabled_sources = sorted(k for k, v in profile.sources.items() if v)
+    if enabled_sources:
+        chips.append("sources: " + " + ".join(enabled_sources))
     return chips
 
 

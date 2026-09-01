@@ -225,7 +225,7 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     # The star button on the card carries the is-on modifier.
     assert 'data-action="star"' in body
     assert 'data-listing="craigslist:seed-1"' in body
-    assert 'class="action-btn is-on"' in body
+    assert 'class="card-action-btn is-on"' in body
 
 
 def test_post_note_is_recorded_and_truncated(tmp_path: Path) -> None:
