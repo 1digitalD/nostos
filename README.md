@@ -59,6 +59,18 @@ nostos init \
 - Uses only credentials provided by the user for sources they can legally access.
 - Does not include or operate any hosted data-collection tier.
 
+## Local web UI
+
+For browsing listings with photos and filtering in a real browser:
+
+```bash
+nostos web                          # serves on 127.0.0.1:8421, opens browser
+nostos web --port 9000              # different port
+nostos web --export ~/Desktop/listings.html   # write a self-contained HTML file
+```
+
+The web UI binds to `127.0.0.1` only. There is no auth — it is a self-hosted single-user tool. To share a snapshot with someone on another machine, use `--export` and send the file. Action buttons (`Star` / `Dismiss` / `Contacted` / `Note`) write to a `listing_action` table so preferences persist across `nostos watch` runs.
+
 ## Development
 
 ```bash

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Listings · Nostos{% endblock %}
+{% block content %}
+<section class="filter-card">
+  <form method="get" action="/" class="filter-form">
+    <div class="field">
+      <label for="rent_min">Rent min</label>
+      <input id="rent_min" name="rent_min" type="number" step="50" min="0"
+             value="{{ filters.rent_min or '' }}">
+    </div>
+    <div class="field">
+      <label for="rent_max">Rent max</label>
+      <input id="rent_max" name="rent_max" type="number" step="50" min="0"
+             value="{{ filters.rent_max or '' }}">
+    </div>
+    <div class="field">
+      <label for="beds">Beds ≥</label>
+      <input id="beds" name="beds" type="number" step="1" min="0"
+             value="{{ filters.beds or '' }}">
+    </div>
+    <div class="field">
+      <label for="baths_min">Baths ≥</label>
+      <input id="baths_min" name="baths_min" type="number" step="0.5" min="0"
+             value="{{ filters.baths_min or '' }}">
+    </div>
+    <div class="field">
+      <label for="area_min">Area ≥</label>
+      <input id="area_min" name="area_min" type="number" step="10" min="0"
+             value="{{ filters.area_min or '' }}">
+    </div>
+    <div class="field">
+      <label for="score_min">Score ≥</label>
+      <input id="score_min" name="score_min" type="number" step="1" min="0" max="100"
+             value="{{ filters.score_min or '' }}">
+    </div>
+    <div class="field">
+      <label for="source">Source</label>
+      <select id="source" name="source">
+        <option value="">any</option>
+        {% for name in sources %}
+          <option value="{{ name }}" {% if filters.source == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="area_name">Area</label>
+      <select id="area_name" name="area_name">
+        <option value="">any</option>
+        {% for key, label in areas %}
+          <option value="{{ key }}" {% if filters.area_name == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="sort">Sort</label>
+      <select id="sort" name="sort">
+        <option value="score" {% if filters.sort == 'score' %}selected{% endif %}>Score (desc)</option>
+        <option value="rent" {% if filters.sort == 'rent' %}selected{% endif %}>Rent (asc)</option>
+        <option value="posted" {% if filters.sort == 'posted' %}selected{% endif %}>Posted (desc)</option>
+        <option value="address" {% if filters.sort == 'address' %}selected{% endif %}>Address</option>
+      </select>
+    </div>
+    <div class="actions">
+      <button type="submit">Apply</button>
+      <a class="reset" href="/">Reset</a>
+    </div>
+  </form>
+  {% if active_filters %}
+    <p class="active-summary">
+      Showing {{ rows | length }} listing(s) matching filters.
+    </p>
+  {% endif %}
+</section>
+
+<section class="result-card">
+  {% if rows %}
+    <table class="listings">
+      <thead>
+        <tr>
+          <th>Photo</th>
+          <th>Score</th>
+          <th>Address</th>
+          <th>Source</th>
+          <th>Posted</th>
+          <th>Rent</th>
+          <th>Beds/Baths</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>
+              {% if row.primary_photo %}
+                <img class="thumb" src="{{ row.primary_photo.url }}" alt="" loading="lazy">
+              {% else %}
+                <span class="thumb thumb-none">—</span>
+              {% endif %}
+            </td>
+            <td>{{ row.score | score_badge | safe }}</td>
+            <td>
+              <a class="row-title" href="/listings/{{ row.listing_id }}">
+                {{ row.title or row.address or row.listing_id }}
+              </a>
+              {% if row.address %}
+                <div class="row-address">{{ row.address }}</div>
+              {% endif %}
+            </td>
+            <td><span class="source-tag source-{{ row.source }}">{{ row.source }}</span></td>
+            <td>{{ row.posted_at | relativetime }}</td>
+            <td>{{ row.rent_text }}</td>
+            <td>
+              {% if row.beds is not none %}{{ row.beds | round(0, 'floor') | int }}{% else %}—{% endif %}br
+              /
+              {% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}ba
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">No listings match the current filters. Try widening them, or run <code>nostos watch --yes</code> first.</p>
+  {% endif %}
+</section>
+{% endblock %}

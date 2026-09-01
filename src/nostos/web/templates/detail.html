@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}{{ row.title or row.address or row.listing_id }} · Nostos{% endblock %}
+{% block content %}
+<a class="back" href="/">← All listings</a>
+
+<section class="detail-card">
+  <header class="detail-head">
+    <h1>{{ row.title or row.address or row.listing_id }}</h1>
+    <p class="detail-sub">
+      <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
+      <span>Posted {{ row.posted_at | relativetime }}</span>
+      <span>Listing ID: <code>{{ row.listing_id }}</code></span>
+    </p>
+  </header>
+
+  <div class="detail-grid">
+    <div class="detail-main">
+      <dl class="kv">
+        <dt>Score</dt>
+        <dd>{{ row.score | score_badge | safe }}</dd>
+        <dt>Rent</dt>
+        <dd>{{ row.rent_text }}</dd>
+        <dt>Address</dt>
+        <dd>{{ row.address or '—' }}</dd>
+        <dt>Bedrooms</dt>
+        <dd>
+          {% if row.beds is not none %}{{ row.beds }}{% else %}—{% endif %}
+        </dd>
+        <dt>Bathrooms</dt>
+        <dd>
+          {% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}
+        </dd>
+        <dt>Area</dt>
+        <dd>
+          {% if row.area_value is not none %}{{ row.area_value }} {{ row.area_unit or '' }}{% else %}—{% endif %}
+        </dd>
+        <dt>Area key</dt>
+        <dd>{{ row.area_label or '—' }}</dd>
+        <dt>Original URL</dt>
+        <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">{{ row.url }}</a></dd>
+      </dl>
+
+      {% if row.photos %}
+        <div class="photo-grid">
+          {% for photo in row.photos %}
+            <a class="photo-tile" href="{{ photo.url }}" target="_blank" rel="noopener noreferrer">
+              <img src="{{ photo.url }}" alt="" loading="lazy">
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+
+    <aside class="detail-aside">
+      <section class="actions-card">
+        <h2>Actions</h2>
+        <div class="action-buttons">
+          <form method="post" action="/listings/{{ row.listing_id }}/star">
+            <button type="submit" class="btn btn-star">★ Star</button>
+          </form>
+          <form method="post" action="/listings/{{ row.listing_id }}/dismiss">
+            <button type="submit" class="btn btn-dismiss">✕ Dismiss</button>
+          </form>
+          <form method="post" action="/listings/{{ row.listing_id }}/contacted">
+            <button type="submit" class="btn btn-contact">✉ Contacted</button>
+          </form>
+        </div>
+        <form method="post" action="/listings/{{ row.listing_id }}/note" class="note-form">
+          <label for="note">Add a note</label>
+          <textarea id="note" name="note" rows="3" placeholder="e.g. viewing scheduled Thursday 6pm"></textarea>
+          <button type="submit" class="btn btn-note">Save note</button>
+        </form>
+      </section>
+
+      <section class="actions-history">
+        <h2>Action history</h2>
+        {% if actions %}
+          <ul class="action-list">
+            {% for action in actions %}
+              <li>
+                <span class="kind kind-{{ action.kind }}">{{ action.kind }}</span>
+                <span class="when">{{ action.created_at | relativetime }}</span>
+                {% if action.note %}
+                  <div class="note">{{ action.note }}</div>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="empty-small">No actions recorded yet.</p>
+        {% endif %}
+      </section>
+    </aside>
+  </div>
+
+  <section class="explain-card">
+    <h2>Why this score?</h2>
+    {% if breakdown %}
+      <pre class="explain-json">{{ breakdown | tojson(indent=2) }}</pre>
+    {% else %}
+      <p class="empty-small">No score breakdown stored for this listing.</p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

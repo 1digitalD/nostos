@@ -46,6 +46,7 @@ from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ScoreRepo
 from nostos.watch.notify import NullNotifier
 from nostos.watch.runner import run_watch
+from nostos.web.query import ListFilter
 
 DEFAULT_CITYPACK_FILE = "vancouver.yaml"
 DEFAULT_PROFILE_FILE = "profile.yaml"
@@ -664,6 +665,147 @@ def explain_command(
     typer.echo(f"score={score_row.score:.3f}")
     typer.echo("")
     typer.echo(explanation)
+
+
+@app.command("web")
+def web_command(
+    profile: Annotated[
+        Path | None,
+        typer.Option(
+            "--profile",
+            help="Profile file path. Defaults to XDG config location.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path | None,
+        typer.Option("--db", help="SQLite DB path. Defaults to XDG data location."),
+    ] = None,
+    citypack: Annotated[
+        Path | None,
+        typer.Option(
+            "--citypack",
+            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+        ),
+    ] = None,
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port",
+            min=1,
+            max=65535,
+            help="Port for the local web server (ignored in --export mode).",
+        ),
+    ] = 8421,
+    host: Annotated[
+        str,
+        typer.Option(
+            "--host",
+            help="Bind address. Defaults to 127.0.0.1; any non-loopback host logs a loud warning.",
+        ),
+    ] = "127.0.0.1",
+    export: Annotated[
+        Path | None,
+        typer.Option(
+            "--export",
+            help="Write a single self-contained HTML file to this path and exit.",
+        ),
+    ] = None,
+    no_browser: Annotated[
+        bool,
+        typer.Option(
+            "--no-browser",
+            help="Skip auto-opening the browser when serving (serve mode only).",
+        ),
+    ] = False,
+) -> None:
+    """Browse and act on ranked listings through a local web UI.
+
+    Two modes:
+
+    - serve (default): starts a FastAPI app bound to 127.0.0.1 on --port.
+    - export: writes a single self-contained HTML file to --export path so it
+      can be opened in any browser without a server (read-only — use the
+      serve mode to record star/dismiss/contacted/note actions).
+
+    Examples:
+      nostos web
+      nostos web --port 9000
+      nostos web --export ~/Desktop/listings.html
+      nostos web --host 0.0.0.0 --port 8421
+    """
+
+    profile_path = _resolve_profile_path(profile)
+    db_path = _resolve_db_path(db)
+    citypack_path = _resolve_citypack_path(citypack)
+    _require_file(profile_path, "--profile")
+    _require_file(citypack_path, "--citypack")
+    _require_file(db_path, "--db")
+
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    profile_id = _profile_id(profile_path)
+    source_objects = {item.name: item for item in _instantiate_sources(source_names=None)}
+
+    if export is not None:
+        from nostos.web.query import query_list
+
+        with connect(db_path) as conn:
+            rows = query_list(
+                conn,
+                context=context,
+                profile_id=profile_id,
+                sources=source_objects,
+                filters=ListFilter(),
+            )
+        from nostos.web.static_export import write_static_export
+
+        written = write_static_export(
+            rows,
+            output_path=export,
+            profile_id=profile_id,
+        )
+        typer.echo(f"profile_path={profile_path}")
+        typer.echo(f"db_path={db_path}")
+        typer.echo(f"citypack_path={citypack_path}")
+        typer.echo(f"profile_id={profile_id}")
+        typer.echo(f"export_path={written}")
+        typer.echo(f"listings_written={len(rows)}")
+        return
+
+    if host != "127.0.0.1" and not host.startswith("127."):
+        typer.secho(
+            f"WARNING: binding {host!r} exposes the web UI on your network. "
+            "It has no auth — anyone who can reach it can record actions on your data.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+
+    import webbrowser
+
+    import uvicorn
+
+    from nostos.web import create_app
+
+    app = create_app(
+        db_path=db_path,
+        profile_path=profile_path,
+        citypack_path=citypack_path,
+    )
+    typer.echo(f"profile_path={profile_path}")
+    typer.echo(f"db_path={db_path}")
+    typer.echo(f"citypack_path={citypack_path}")
+    typer.echo(f"profile_id={profile_id}")
+    typer.echo(f"url=http://{host}:{port}/")
+    url = f"http://{host}:{port}/"
+    if not no_browser:
+        try:
+            webbrowser.open(url)
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(
+                f"Could not auto-open browser ({exc!s}); open {url} manually.",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 class _SourceRecordRow(NamedTuple):
