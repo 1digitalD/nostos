@@ -6,78 +6,116 @@
     <div class="profile-summary">
       <span class="profile-summary-label">Ranking profile:</span>
       {% for chip in profile_summary %}
-        <span class="profile-summary-chip">{{ chip }}</span>
+        <span class="profile-summary-chip profile-summary-chip-{{ chip.kind }}">{{ chip.label }}</span>
       {% endfor %}
       <a class="profile-summary-edit" href="/profile" title="Edit weights, thresholds, sources">⚙ Edit</a>
     </div>
   {% endif %}
 
-  <form method="get" action="/" class="filter-form">
-    <div class="field">
-      <label for="rent_min">Rent min</label>
-      <input id="rent_min" name="rent_min" type="number" step="50" min="0"
-             value="{{ filters.rent_min or '' }}">
-    </div>
-    <div class="field">
-      <label for="rent_max">Rent max</label>
-      <input id="rent_max" name="rent_max" type="number" step="50" min="0"
-             value="{{ filters.rent_max or '' }}">
-    </div>
-    <div class="field">
-      <label for="beds">Beds ≥</label>
-      <input id="beds" name="beds" type="number" step="1" min="0"
-             value="{{ filters.beds or '' }}">
-    </div>
-    <div class="field">
-      <label for="baths_min">Baths ≥</label>
-      <input id="baths_min" name="baths_min" type="number" step="0.5" min="0"
-             value="{{ filters.baths_min or '' }}">
-    </div>
-    <div class="field">
-      <label for="area_min">Area ≥</label>
-      <input id="area_min" name="area_min" type="number" step="10" min="0"
-             value="{{ filters.area_min or '' }}">
-    </div>
-    <div class="field">
-      <label for="score_min">Score ≥</label>
-      <input id="score_min" name="score_min" type="number" step="1" min="0" max="100"
-             value="{{ filters.score_min or '' }}">
-    </div>
-    <div class="field">
-      <label for="source">Source</label>
-      <select id="source" name="source">
-        <option value="">any</option>
-        {% for name in sources %}
-          <option value="{{ name }}" {% if filters.source == name %}selected{% endif %}>{{ name }}</option>
+  <nav class="chip-row area-chips" aria-label="Area">
+    {% for chip in area_chips %}
+      <a class="toggle-chip {% if chip.active %}is-on{% endif %}"
+         href="{{ chip.url }}"
+         data-area="{{ chip.key }}"
+         aria-pressed="{{ 'true' if chip.active else 'false' }}">{{ chip.label }}</a>
+    {% endfor %}
+  </nav>
+
+  <form method="get" action="/" class="filter-form" id="filter-form">
+    {# Chip-driven params ride along as hidden inputs so Apply / sort keep them. #}
+    {% if filters.area_name %}<input type="hidden" name="area_name" value="{{ filters.area_name }}">{% endif %}
+    {% if filters.status %}<input type="hidden" name="status" value="{{ filters.status }}">{% endif %}
+    {% if filters.starred %}<input type="hidden" name="starred" value="1">{% endif %}
+    {% if filters.hide_dismissed %}<input type="hidden" name="hide_dismissed" value="1">{% endif %}
+    {% if filters.show_excluded %}<input type="hidden" name="show_excluded" value="1">{% endif %}
+
+    <div class="toolbar">
+      <div class="chip-row quick-toggles" aria-label="Quick filters">
+        {% for toggle in quick_toggles %}
+          <a class="toggle-chip toggle-{{ toggle.param }} {% if toggle.active %}is-on{% endif %}"
+             href="{{ toggle.url }}"
+             title="{{ toggle.title }}"
+             data-toggle="{{ toggle.param }}"
+             aria-pressed="{{ 'true' if toggle.active else 'false' }}">{{ toggle.label }}</a>
         {% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <label for="area_name">Area</label>
-      <select id="area_name" name="area_name">
-        <option value="">any</option>
-        {% for key, label in areas %}
-          <option value="{{ key }}" {% if filters.area_name == key %}selected{% endif %}>{{ label }}</option>
+        <span class="chip-sep" aria-hidden="true"></span>
+        {% for chip in status_chips %}
+          <a class="toggle-chip status-chip status-chip-{{ chip.value }} {% if chip.active %}is-on{% endif %}"
+             href="{{ chip.url }}"
+             title="{{ chip.title }}"
+             data-status="{{ chip.value }}"
+             aria-pressed="{{ 'true' if chip.active else 'false' }}">{{ chip.label }}</a>
         {% endfor %}
-      </select>
+      </div>
+      <div class="field field-sort">
+        <label for="sort">Sort</label>
+        <select id="sort" name="sort" onchange="this.form.submit()">
+          {% for key, label in sort_options %}
+            <option value="{{ key }}" {% if filters.sort == key %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
     </div>
-    <div class="field">
-      <label for="sort">Sort</label>
-      <select id="sort" name="sort">
-        <option value="score" {% if filters.sort == 'score' %}selected{% endif %}>Score (desc)</option>
-        <option value="rent" {% if filters.sort == 'rent' %}selected{% endif %}>Rent (asc)</option>
-        <option value="posted" {% if filters.sort == 'posted' %}selected{% endif %}>Posted (desc)</option>
-        <option value="address" {% if filters.sort == 'address' %}selected{% endif %}>Address</option>
-      </select>
-    </div>
-    <div class="actions">
-      <button type="submit">Apply</button>
-      <a class="reset" href="/">Reset</a>
-      <span class="results-count">
-        {{ rows | length }} listing{{ '' if rows|length == 1 else 's' }}
-      </span>
-    </div>
+
+    <details class="more-filters" {% if filters.has_numeric %}open{% endif %}>
+      <summary>More filters{% if filters.has_numeric %} <span class="more-filters-count">active</span>{% endif %}</summary>
+      <div class="more-filters-grid">
+        <div class="field">
+          <label for="rent_min">Rent min</label>
+          <input id="rent_min" name="rent_min" type="number" step="50" min="0"
+                 value="{{ filters.rent_min or '' }}">
+        </div>
+        <div class="field">
+          <label for="rent_max">Rent max</label>
+          <input id="rent_max" name="rent_max" type="number" step="50" min="0"
+                 value="{{ filters.rent_max or '' }}">
+        </div>
+        <div class="field">
+          <label for="beds">Beds ≥</label>
+          <input id="beds" name="beds" type="number" step="1" min="0"
+                 value="{{ filters.beds or '' }}">
+        </div>
+        <div class="field">
+          <label for="baths_min">Baths ≥</label>
+          <input id="baths_min" name="baths_min" type="number" step="0.5" min="0"
+                 value="{{ filters.baths_min or '' }}">
+        </div>
+        <div class="field">
+          <label for="area_min">Area ≥</label>
+          <input id="area_min" name="area_min" type="number" step="10" min="0"
+                 value="{{ filters.area_min or '' }}">
+        </div>
+        <div class="field">
+          <label for="score_min">Score ≥</label>
+          <input id="score_min" name="score_min" type="number" step="1" min="0" max="100"
+                 value="{{ filters.score_min or '' }}">
+        </div>
+        <div class="field">
+          <label for="source">Source</label>
+          <select id="source" name="source">
+            <option value="">any</option>
+            {% for name in sources %}
+              <option value="{{ name }}" {% if filters.source == name %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="actions">
+          <button type="submit">Apply</button>
+          <a class="reset" href="/">Reset</a>
+        </div>
+      </div>
+    </details>
   </form>
+
+  <div class="results-line">
+    <span class="results-count">
+      {{ rows | length }} listing{{ '' if rows|length == 1 else 's' }}
+    </span>
+    <span class="results-sort">Sorted by {{ sort_label }}</span>
+    {% if filter_chips %}
+      <a class="reset results-reset" href="/">Reset all</a>
+    {% endif %}
+  </div>
 
   {% if filter_chips %}
     <div class="filter-chips">
@@ -91,16 +129,26 @@
   {% endif %}
 </section>
 
+{% set status_titles = {
+  'match': 'Listing meets all stated profile criteria',
+  'unverified': 'Some criteria-relevant fields are unstated',
+  'miss': 'Listing fails at least one criterion',
+  'excluded': 'You marked this listing excluded'
+} %}
+
 {% if rows %}
   <div class="card-grid">
     {% for row in rows %}
       {% set state = row_actions.get(row.listing_id, {}) %}
       {% set photo = row.primary_photo %}
       {% set aspect = (photo.width / photo.height) if (photo and photo.width and photo.height) else 1.33 %}
+      {% set contributors = contributors_by_id.get(row.listing_id, []) %}
       <article class="card
                      {% if state.dismiss %}is-dismissed{% endif %}
                      {% if state.star %}is-starred{% endif %}
-                     {% if row.match_status == 'excluded' %}is-excluded{% endif %}">
+                     {% if row.match_status == 'excluded' %}is-excluded{% endif %}"
+               data-listing-id="{{ row.listing_id }}"
+               data-status="{{ row.match_status }}">
 
         <a class="card-photo-wrap"
            href="/listings/{{ row.listing_id }}"
@@ -116,6 +164,10 @@
           {% else %}
             <div class="card-photo card-photo-none">no photo</div>
           {% endif %}
+          <div class="card-overlay">
+            <span class="card-overlay-spacer"></span>
+            <span class="card-score" title="Match score (0–100)">{{ row.score | score_badge | safe }}</span>
+          </div>
         </a>
 
         <div class="card-body">
@@ -125,7 +177,7 @@
               <span class="card-rent-unit">/mo</span>
             </div>
             <span class="status-badge status-{{ row.match_status }}"
-                  title="{{ {'match':'Listing meets all stated profile criteria','unverified':'Some criteria-relevant fields are unstated','miss':'Listing fails at least one criterion','excluded':'You marked this listing excluded'}[row.match_status] }}">
+                  title="{{ row.match_reasons_text or status_titles[row.match_status] }}">
               {% if row.match_status == 'match' %}✓ Match{% elif row.match_status == 'unverified' %}? Unverified{% elif row.match_status == 'miss' %}✕ Miss{% elif row.match_status == 'excluded' %}⊘ Excluded{% endif %}
             </span>
           </div>
@@ -137,9 +189,17 @@
             {% if row.area_label %}<span>{{ row.area_label }}</span>{% endif %}
           </div>
 
-          <div class="card-address">
+          <a class="card-title" href="/listings/{{ row.listing_id }}" title="{{ row.title or row.address or row.listing_id }}">
             {{ row.title or row.address or row.listing_id }}
-          </div>
+          </a>
+
+          {% if contributors %}
+            <div class="card-contrib-line" title="Top scoring factors">
+              {% for c in contributors %}
+                <span class="contrib {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">{% if c.contribution >= 0 %}+{{ c.contribution | round(0) | int }}{% else %}−{{ (c.contribution | abs) | round(0) | int }}{% endif %} {{ c.label | lower }}</span>{% if not loop.last %}<span class="contrib-sep">·</span>{% endif %}
+              {% endfor %}
+            </div>
+          {% endif %}
 
           <div class="card-facts">
             {% set facts = row.facts_summary %}
@@ -166,7 +226,7 @@
               <div class="cat-scores-title">Match breakdown</div>
               {% for cat in row.category_scores %}
                 <div class="cat-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}">
-                  <div class="cat-name">{{ cat.category }}</div>
+                  <div class="cat-name" title="{{ cat.label }}">{{ cat.label }}</div>
                   <div class="cat-bar">
                     <div class="cat-bar-fill"
                          style="width: {{ cat.pct | round(1) }}%"></div>
@@ -195,12 +255,12 @@
                     aria-label="Dismiss"
                     aria-pressed="{{ 'true' if state.dismiss else 'false' }}">✕ Dismiss</button>
             <button type="button"
-                    class="card-action-btn card-action-exclude {% if state.excluded %}is-on{% endif %}"
+                    class="card-action-btn card-action-exclude {% if row.match_status == 'excluded' %}is-on{% endif %}"
                     data-action="excluded"
                     data-listing="{{ row.listing_id }}"
-                    title="{% if state.excluded %}Excluded — click to undo (will reappear){% else %}Exclude (auto-hides from list){% endif %}"
+                    title="{% if row.match_status == 'excluded' %}Excluded — click to undo{% else %}Exclude (hides from list unless “Show excluded” is on){% endif %}"
                     aria-label="Exclude"
-                    aria-pressed="{{ 'true' if state.excluded else 'false' }}">⊘ Exclude</button>
+                    aria-pressed="{{ 'true' if row.match_status == 'excluded' else 'false' }}">⊘ Exclude</button>
             <a class="card-action-btn card-action-view"
                href="{{ row.url }}"
                target="_blank"
@@ -220,15 +280,19 @@
 {% else %}
   <div class="empty-card">
     <p>No listings match the current filters.</p>
-    <p class="empty-hint">Try widening them, or run <code>nostos watch --yes</code> first.</p>
+    <p class="empty-hint">
+      {% if filter_chips %}Try <a href="/">resetting the filters</a>{% if not filters.show_excluded %} or turning on “Show excluded”{% endif %}.{% else %}Run <code>nostos watch --yes</code> first.{% endif %}
+    </p>
   </div>
 {% endif %}
 
 <script>
 (function () {
   // One-click star / dismiss / exclude on the card grid. Falls back to the
-  // detail page if the POST fails for any reason. Exclude reloads home so
-  // the just-hidden listing is removed from view immediately.
+  // detail page if the POST fails for any reason. Exclude / un-exclude
+  // reloads the *current* URL (filters, sort and show_excluded preserved)
+  // so the listing appears or disappears according to the active view.
+  var currentUrl = window.location.pathname + window.location.search;
   document.addEventListener('click', async function (event) {
     const btn = event.target.closest('[data-action]');
     if (!btn) return;
@@ -242,19 +306,21 @@
       const res = await fetch('/listings/' + encodeURIComponent(listingId) + '/' + action, {
         method: 'POST',
         headers: { 'X-Requested-With': 'fetch' },
+        redirect: 'manual',
       });
-      if (res.ok) {
+      if (res.ok || res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
         const wasOn = btn.classList.contains('is-on');
         btn.classList.toggle('is-on');
         btn.setAttribute('aria-pressed', String(!wasOn));
+        const card = btn.closest('.card');
+        if (action === 'star' && card) card.classList.toggle('is-starred', !wasOn);
+        if (action === 'dismiss' && card) card.classList.toggle('is-dismissed', !wasOn);
         if (action === 'excluded') {
-          // Excluding auto-hides the listing. Fade out, then reload.
-          const card = btn.closest('.card');
           if (card) {
             card.style.transition = 'opacity 0.2s ease';
             card.style.opacity = '0.4';
           }
-          setTimeout(function () { window.location.href = '/'; }, 200);
+          setTimeout(function () { window.location.href = currentUrl; }, 200);
         }
       } else {
         window.location.href = '/listings/' + encodeURIComponent(listingId);

@@ -1,6 +1,7 @@
 city: vancouver
 hard:
   rent:
+    min: 2500
     max: 3600
     currency: CAD
   beds:
@@ -11,6 +12,14 @@ hard:
   area:
     min: 750
     unit: sqft
+  floor:
+    max: 12
+  areas:                # citypack areas[].key; a listing with an unknown area still passes
+    - downtown_van
+    - burnaby_brentwood
+    - kits_beach
+    - n_van_lonsdale
+    - west_van
   exclude:
     - basement
     - furnished_only
@@ -24,6 +33,7 @@ weights:
   space.den_or_solarium: 3
   density.walkable: 2
   density.sparse: -2
+  photo.present: 2
   area.over_minimum:
     per_100_sqft: 4
     cap: 12

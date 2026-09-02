@@ -9,7 +9,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -26,14 +26,15 @@ from nostos.config.wizard import (
 from nostos.context import load_search_context
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import SourceRecord
-from nostos.rank.engine import NormalizationWindow, RankEngine, RuleContribution, ScoreResult
+from nostos.rank.engine import NormalizationWindow, RuleContribution, ScoreResult
 from nostos.rank.explain import render_score_explanation
 from nostos.rank.profile_scoring import (
     listing_title,
     prepare_listing_for_profile,
     rent_display,
-    score_listing_for_profile,
 )
+from nostos.rank.rescore import SourceRecordRow as _SourceRecordRow
+from nostos.rank.rescore import rescore_profile
 from nostos.rank.rules import Signal
 from nostos.sources import (
     CraigslistSource,
@@ -471,59 +472,21 @@ def rank_command(
 
     context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
     profile_id = _profile_id(profile_path)
-    rank_engine = RankEngine(context.profile)
-    enrichers = (TextRuleEnricher(),)
     source_objects = {item.name: item for item in _instantiate_sources(source_names=None)}
 
-    scored_rows: list[tuple[str, float]] = []
     with connect(db_path) as conn:
-        apply_migrations(conn)
-        rows = _latest_source_records(conn)
-        score_repo = ScoreRepo(conn)
-        with conn:
-            conn.execute("DELETE FROM score WHERE profile_id = ?", (profile_id,))
-            for record_row in rows:
-                source_obj = source_objects.get(record_row.record.source)
-                if source_obj is None:
-                    continue
-                listing = source_obj.to_listing(record_row.record, context)
-                # `to_listing` is pure and only knows the raw record's own
-                # source/source_id, so it always derives a per-source identity.
-                # `record_row.listing_id` is the canonical id this record was
-                # actually stored under (post cross-source dedupe) — key the
-                # score on that, not on the freshly recomputed identity.
-                if listing.identity.listing_id != record_row.listing_id:
-                    listing = listing.model_copy(
-                        update={
-                            "identity": listing.identity.model_copy(
-                                update={"listing_id": record_row.listing_id}
-                            )
-                        }
-                    )
-                scored_listing = score_listing_for_profile(
-                    listing,
-                    context=context,
-                    enrichers=enrichers,
-                    rank_engine=rank_engine,
-                )
-                if scored_listing is None:
-                    continue
-                result = scored_listing.result
-                score_repo.upsert_score(
-                    listing_id=scored_listing.listing.identity.listing_id,
-                    profile_id=profile_id,
-                    score=result.score,
-                    breakdown_json=_score_result_to_json(result),
-                    computed_at=record_row.record.fetched_at,
-                )
-                scored_rows.append((scored_listing.listing.identity.listing_id, result.score))
+        report = rescore_profile(
+            conn,
+            context=context,
+            profile_id=profile_id,
+            sources=source_objects,
+        )
 
-    scored_rows.sort(key=lambda item: item[1], reverse=True)
     typer.echo(f"profile_path={profile_path}")
     typer.echo(f"db_path={db_path}")
     typer.echo(f"profile_id={profile_id}")
-    typer.echo(f"ranked_count={len(scored_rows)}")
-    for listing_id, score_value in scored_rows:
+    typer.echo(f"ranked_count={report.scored_count}")
+    for listing_id, score_value in report.rows:
         typer.echo(f"listing_id={listing_id}\tscore={score_value:.3f}")
 
 
@@ -839,11 +802,6 @@ def web_command(
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-class _SourceRecordRow(NamedTuple):
-    listing_id: str
-    record: SourceRecord
-
-
 def _resolve_laundry_pref(
     *,
     laundry: PreferenceLevel | None,
@@ -1012,51 +970,6 @@ def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _latest_source_records(conn: sqlite3.Connection) -> tuple[_SourceRecordRow, ...]:
-    rows = conn.execute(
-        """
-        SELECT
-            sr.listing_id AS listing_id,
-            sr.source AS source,
-            sr.source_id AS source_id,
-            sr.url AS url,
-            sr.payload AS payload,
-            sr.content_hash AS content_hash,
-            sr.fetched_at AS fetched_at
-        FROM source_record sr
-        INNER JOIN (
-            SELECT listing_id, MAX(id) AS latest_id
-            FROM source_record
-            GROUP BY listing_id
-        ) latest
-        ON latest.latest_id = sr.id
-        ORDER BY sr.listing_id ASC
-        """,
-    ).fetchall()
-
-    records: list[_SourceRecordRow] = []
-    for row in rows:
-        payload = json.loads(str(row["payload"]))
-        if not isinstance(payload, Mapping):
-            continue
-        fetched_at = datetime.fromisoformat(str(row["fetched_at"]))
-        source_record = SourceRecord(
-            source=str(row["source"]),
-            source_id=str(row["source_id"]),
-            url=str(row["url"]),
-            payload=dict(payload),
-            content_hash=str(row["content_hash"]),
-            fetched_at=fetched_at,
-        )
-        records.append(
-            _SourceRecordRow(
-                listing_id=str(row["listing_id"]),
-                record=source_record,
-            )
-        )
-    return tuple(records)
-
-
 def _latest_source_records_by_listing_ids(
     conn: sqlite3.Connection, *, listing_ids: tuple[str, ...]
 ) -> dict[str, _SourceRecordRow]:
@@ -1107,46 +1020,6 @@ def _latest_source_records_by_listing_ids(
 
 def _tab_safe(value: str) -> str:
     return value.replace("\t", " ").replace("\n", " ")
-
-
-def _score_result_to_json(result: ScoreResult) -> dict[str, Any]:
-    contributions: list[dict[str, Any]] = []
-    for contribution in result.contributions:
-        if isinstance(contribution.weight, ScaledWeight):
-            weight_json: object = contribution.weight.model_dump(mode="json")
-        else:
-            weight_json = float(contribution.weight)
-        signal_json: dict[str, Any] | None = None
-        if contribution.signal is not None:
-            signal_json = {
-                "fired": contribution.signal.fired,
-                "magnitude": contribution.signal.magnitude,
-                "confidence": contribution.signal.confidence,
-                "evidence": contribution.signal.evidence,
-            }
-        contributions.append(
-            {
-                "rule_key": contribution.rule_key,
-                "category": contribution.category,
-                "label": contribution.label,
-                "weight": weight_json,
-                "signal": signal_json,
-                "shaped_magnitude": contribution.shaped_magnitude,
-                "confidence_factor": contribution.confidence_factor,
-                "min_possible": contribution.min_possible,
-                "max_possible": contribution.max_possible,
-                "contribution": contribution.contribution,
-            }
-        )
-    return {
-        "score": result.score,
-        "total_contribution": result.total_contribution,
-        "normalization": {
-            "min_possible": result.normalization.min_possible,
-            "max_possible": result.normalization.max_possible,
-        },
-        "contributions": contributions,
-    }
 
 
 def _score_result_from_json(

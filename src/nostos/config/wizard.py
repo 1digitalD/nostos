@@ -110,6 +110,10 @@ def build_profile_payload(*, answers: WizardAnswers, citypack: Citypack) -> dict
     if answers.min_area is not None:
         weights["area.over_minimum"] = {"per_100_sqft": 4, "cap": 12}
 
+    # Listings without photos are almost always worth less of your time; every
+    # generated profile carries a small bonus for having at least one.
+    weights["photo.present"] = 2
+
     selected_sources = {name for name in answers.source_names}
     source_toggles: dict[str, str] = {}
     for source_name in citypack.sources:
