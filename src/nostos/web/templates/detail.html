@@ -3,25 +3,39 @@
 {% block content %}
 <a class="back" href="/">← All listings</a>
 
+{% set status_titles = {
+  'match': 'Meets all stated profile criteria',
+  'unverified': 'Some criteria-relevant fields are unstated',
+  'miss': 'Fails at least one criterion',
+  'excluded': 'You marked this listing excluded'
+} %}
+
 <section class="detail-card">
   <header class="detail-head">
     <h1>{{ row.title or row.address or row.listing_id }}</h1>
     <p class="detail-sub">
       <span class="status-badge status-{{ row.match_status }}"
-            title="{{ {'match':'Meets all stated profile criteria','unverified':'Some criteria-relevant fields are unstated','miss':'Fails at least one criterion','excluded':'You marked this listing excluded'}[row.match_status] }}">
+            title="{{ row.match_reasons_text or status_titles[row.match_status] }}">
         {% if row.match_status == 'match' %}✓ Match{% elif row.match_status == 'unverified' %}? Unverified{% elif row.match_status == 'miss' %}✕ Miss{% elif row.match_status == 'excluded' %}⊘ Excluded{% endif %}
       </span>
       <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
       <span>Posted {{ row.posted_at | relativetime }}</span>
       <span>Listing ID: <code>{{ row.listing_id }}</code></span>
     </p>
+    {% if row.match_reasons %}
+      <ul class="match-reasons status-{{ row.match_status }}" aria-label="Why this status">
+        {% for reason in row.match_reasons %}
+          <li>{{ reason }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   </header>
 
   <div class="detail-grid">
     <div class="detail-main">
       <dl class="kv">
         <dt>Score</dt>
-        <dd><span class="score-pill {% if row.score >= 75 %}score-good{% elif row.score >= 50 %}score-mid{% else %}score-low{% endif %}">{{ row.score | round(1) }}</span></dd>
+        <dd>{{ row.score | score_badge | safe }}</dd>
         <dt>Rent</dt>
         <dd>{{ row.rent_text }}</dd>
         <dt>Address</dt>
@@ -32,7 +46,7 @@
         <dd>{% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}</dd>
         <dt>Area</dt>
         <dd>{% if row.area_value is not none %}{{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or '' }}{% else %}—{% endif %}</dd>
-        <dt>Area key</dt>
+        <dt>Neighbourhood</dt>
         <dd>{{ row.area_label or '—' }}</dd>
         <dt>Original URL</dt>
         <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">{{ row.url }}</a></dd>
@@ -131,12 +145,15 @@
   </div>
 
   <section class="explain-card">
-    <h2>Match breakdown</h2>
+    <div class="explain-head">
+      <h2>Match breakdown</h2>
+      <a class="profile-summary-edit" href="/profile" title="Edit weights, thresholds, sources">⚙ Edit ranking profile</a>
+    </div>
     {% if category_scores %}
       <div class="cat-scores">
         {% for cat in category_scores %}
           <div class="cat-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}">
-            <div class="cat-name">{{ cat.category }}</div>
+            <div class="cat-name" title="{{ cat.label }}">{{ cat.label }}</div>
             <div class="cat-bar">
               <div class="cat-bar-fill" style="width: {{ cat.pct | round(1) }}%"></div>
             </div>
@@ -146,10 +163,64 @@
           </div>
         {% endfor %}
       </div>
+    {% endif %}
+
+    {% if rule_rows_fired or rule_rows_idle %}
+      {% if rule_rows_fired %}
+        <div class="rule-table-wrap">
+          <table class="rule-table">
+            <thead>
+              <tr>
+                <th scope="col">Rule</th>
+                <th scope="col">Evidence</th>
+                <th scope="col" class="num">Contribution</th>
+                <th scope="col" class="num">Weight</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rule_rows_fired %}
+                <tr class="rule-row {% if r.contribution >= 0 %}match{% else %}miss{% endif %}" data-rule="{{ r.rule_key }}">
+                  <td class="rule-label">
+                    <span class="rule-name">{{ r.label }}</span>
+                    <span class="rule-cat">{{ r.category_label }}</span>
+                  </td>
+                  <td class="rule-evidence">{% if r.evidence %}{{ r.evidence }}{% else %}<span class="empty-small">—</span>{% endif %}</td>
+                  <td class="num rule-contrib">{{ r.contribution_text }}</td>
+                  <td class="num rule-weight">{{ r.weight_text }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-small">No rule contributed to this score.</p>
+      {% endif %}
+      {% if rule_rows_idle %}
+        <details class="rule-idle">
+          <summary>Rules that didn't fire ({{ rule_rows_idle | length }})</summary>
+          <div class="rule-table-wrap">
+            <table class="rule-table rule-table-idle">
+              <tbody>
+                {% for r in rule_rows_idle %}
+                  <tr class="rule-row idle" data-rule="{{ r.rule_key }}">
+                    <td class="rule-label">
+                      <span class="rule-name">{{ r.label }}</span>
+                      <span class="rule-cat">{{ r.category_label }}</span>
+                    </td>
+                    <td class="rule-evidence">{% if r.evidence %}{{ r.evidence }}{% else %}<span class="empty-small">no evidence found</span>{% endif %}</td>
+                    <td class="num rule-contrib">0.0</td>
+                    <td class="num rule-weight">{{ r.weight_text }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      {% endif %}
       <p class="empty-small">
         <a href="/listings/{{ row.listing_id }}/explain.json" target="_blank" rel="noopener noreferrer">Raw JSON breakdown</a>
       </p>
-    {% else %}
+    {% elif not category_scores %}
       <p class="empty-small">No score breakdown stored for this listing.</p>
     {% endif %}
   </section>
@@ -157,6 +228,7 @@
 
 <script>
 (function () {
+  var currentUrl = window.location.pathname + window.location.search;
   document.addEventListener('click', async function (event) {
     const btn = event.target.closest('[data-action]');
     if (!btn) return;
@@ -170,8 +242,9 @@
       const res = await fetch('/listings/' + encodeURIComponent(listingId) + '/' + action, {
         method: 'POST',
         headers: { 'X-Requested-With': 'fetch' },
+        redirect: 'manual',
       });
-      if (res.ok) {
+      if (res.ok || res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
         const wasOn = btn.classList.contains('is-on');
         btn.classList.toggle('is-on');
         btn.setAttribute('aria-pressed', String(!wasOn));
@@ -185,10 +258,8 @@
         else if (contact) btn.textContent = !wasOn ? '✉ Contacted' : '✉ Mark contacted';
         else if (exclude) {
           btn.textContent = !wasOn ? '⊘ Excluded — click to undo' : '⊘ Exclude (auto-hide)';
-          if (wasOn) {
-            // Un-excluding: navigate home so the listing reappears
-            setTimeout(function () { window.location.href = '/'; }, 200);
-          }
+          // Reload this page so the status badge reflects the new state.
+          setTimeout(function () { window.location.href = currentUrl; }, 200);
         }
       } else {
         btn.disabled = false;

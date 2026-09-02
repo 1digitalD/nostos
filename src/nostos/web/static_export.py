@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nostos.web.query import ListRow, to_jsonable
+from nostos.web.query import SORT_OPTIONS, ListRow, to_jsonable
 
 _TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -64,12 +64,24 @@ _TEMPLATE = """<!doctype html>
           </select>
         </div>
         <div class="field">
+          <label for="area">Area</label>
+          <select id="area">
+            <option value="">any</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="status">Status</label>
+          <select id="status">
+            <option value="">any</option>
+            <option value="match">Match</option>
+            <option value="unverified">Unverified</option>
+            <option value="miss">Miss</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="sort">Sort</label>
           <select id="sort">
-            <option value="score">Score (desc)</option>
-            <option value="rent">Rent (asc)</option>
-            <option value="posted">Posted (desc)</option>
-            <option value="address">Address</option>
+{sort_options}
           </select>
         </div>
         <div class="actions">
@@ -111,6 +123,20 @@ _TEMPLATE = """<!doctype html>
     opt.value = name;
     opt.textContent = name;
     sourceNode.appendChild(opt);
+  }});
+
+  var areaNode = document.getElementById('area');
+  var areaLabels = {{}};
+  listings.forEach(function(l) {{
+    if (l.area_key) areaLabels[l.area_key] = l.area_label || l.area_key;
+  }});
+  Object.keys(areaLabels).sort(function(a, b) {{
+    return areaLabels[a].localeCompare(areaLabels[b]);
+  }}).forEach(function(key) {{
+    var opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = areaLabels[key];
+    areaNode.appendChild(opt);
   }});
 
   var rows = document.getElementById('rows');
@@ -156,6 +182,8 @@ _TEMPLATE = """<!doctype html>
     var areaMin = num('area_min');
     var scoreMin = num('score_min');
     var source = document.getElementById('source').value;
+    var area = document.getElementById('area').value;
+    var status = document.getElementById('status').value;
     var sort = document.getElementById('sort').value;
 
     var filtered = listings.filter(function(l) {{
@@ -166,30 +194,36 @@ _TEMPLATE = """<!doctype html>
       if (areaMin != null && l.area_value != null && l.area_value < areaMin) return false;
       if (scoreMin != null && l.score < scoreMin) return false;
       if (source && l.source !== source) return false;
+      if (area && l.area_key !== area) return false;
+      if (status && l.match_status !== status) return false;
       return true;
     }});
 
-    if (sort === 'score') {{
-      filtered.sort(function(a, b) {{
-        return b.score - a.score || a.listing_id.localeCompare(b.listing_id);
-      }});
-    }} else if (sort === 'rent') {{
-      filtered.sort(function(a, b) {{
-        var ar = a.rent_value == null ? Infinity : a.rent_value;
-        var br = b.rent_value == null ? Infinity : b.rent_value;
-        return ar - br || a.listing_id.localeCompare(b.listing_id);
-      }});
-    }} else if (sort === 'posted') {{
-      filtered.sort(function(a, b) {{
-        var at = a.posted_at ? new Date(a.posted_at).getTime() : 0;
-        var bt = b.posted_at ? new Date(b.posted_at).getTime() : 0;
-        return bt - at || a.listing_id.localeCompare(b.listing_id);
-      }});
-    }} else if (sort === 'address') {{
-      filtered.sort(function(a, b) {{
-        return (a.address || '').localeCompare(b.address || '');
-      }});
-    }}
+    function byId(a, b) {{ return a.listing_id.localeCompare(b.listing_id); }}
+    function numOr(v, fallback) {{ return v == null ? fallback : v; }}
+    function postedTs(l) {{ return l.posted_at ? new Date(l.posted_at).getTime() : null; }}
+    var sorters = {{
+      score: function(a, b) {{ return b.score - a.score || byId(a, b); }},
+      rent_asc: function(a, b) {{
+        return numOr(a.rent_value, Infinity) - numOr(b.rent_value, Infinity) || byId(a, b);
+      }},
+      rent_desc: function(a, b) {{
+        return numOr(b.rent_value, -Infinity) - numOr(a.rent_value, -Infinity) || byId(a, b);
+      }},
+      area_desc: function(a, b) {{
+        return numOr(b.area_value, -Infinity) - numOr(a.area_value, -Infinity) || byId(a, b);
+      }},
+      posted_desc: function(a, b) {{
+        return numOr(postedTs(b), -Infinity) - numOr(postedTs(a), -Infinity) || byId(a, b);
+      }},
+      posted_asc: function(a, b) {{
+        return numOr(postedTs(a), Infinity) - numOr(postedTs(b), Infinity) || byId(a, b);
+      }},
+      address: function(a, b) {{
+        return (a.address || '').localeCompare(b.address || '') || byId(a, b);
+      }}
+    }};
+    filtered.sort(sorters[sort] || sorters.score);
 
     rows.innerHTML = filtered.map(function(l) {{
       var photo = l.primary_photo
@@ -219,7 +253,7 @@ _TEMPLATE = """<!doctype html>
   }}
 
   var ids = ['rent_min','rent_max','beds','baths_min','area_min',
-              'score_min','source','sort'];
+              'score_min','source','area','status','sort'];
   ids.forEach(function(id) {{
     var el = document.getElementById(id);
     el.addEventListener('input', render);
@@ -231,6 +265,8 @@ _TEMPLATE = """<!doctype html>
       document.getElementById(id).value = '';
     }});
     document.getElementById('source').value = '';
+    document.getElementById('area').value = '';
+    document.getElementById('status').value = '';
     document.getElementById('sort').value = 'score';
     render();
   }});
@@ -259,8 +295,13 @@ def render_static_export(
     }
     data_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     generated_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+    sort_options = "\n".join(
+        f'            <option value="{html.escape(key)}">{html.escape(label)}</option>'
+        for key, label in SORT_OPTIONS
+    )
     return _TEMPLATE.format(
         inline_css=_trim_css(inline_css),
+        sort_options=sort_options,
         profile_id=html.escape(profile_id),
         count=len(listings_json),
         generated_at=html.escape(generated_at),
