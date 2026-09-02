@@ -44,12 +44,19 @@ class RentHardFilter(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max: float
+    min: float | None = None
     currency: NonEmptyStr
 
     @field_validator("currency")
     @classmethod
     def uppercase_currency(cls, value: str) -> str:
         return value.upper()
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> RentHardFilter:
+        if self.min is not None and self.min > self.max:
+            raise ValueError("min must be less than or equal to max")
+        return self
 
 
 class NumericHardFilter(BaseModel):
@@ -86,6 +93,12 @@ class HardFilters(BaseModel):
     beds: NumericHardFilter | None = None
     baths: NumericHardFilter | None = None
     area: AreaHardFilter | None = None
+    # Floor bound (e.g. ``{max: 12}``). Listings whose floor is unstated pass;
+    # only a stated floor outside the bound fails.
+    floor: NumericHardFilter | None = None
+    # Allowed citypack ``areas[].key`` values. Empty means any area. A listing
+    # whose area is unknown passes (it is flagged unverified in the UI).
+    areas: list[NonEmptyStr] = Field(default_factory=list)
     exclude: list[NonEmptyStr] = Field(default_factory=list)
 
 

@@ -60,6 +60,8 @@ def passes_hard_filters(listing: Listing, profile: Profile) -> bool:
         rent_value = _money_amount(listing)
         if rent_value is None or rent_value > hard.rent.max:
             return False
+        if hard.rent.min is not None and rent_value < hard.rent.min:
+            return False
 
     if hard.beds is not None:
         beds_value = _observed_float(listing.beds)
@@ -88,6 +90,23 @@ def passes_hard_filters(listing: Listing, profile: Profile) -> bool:
         if hard.area.unit.lower() != area_value.unit.lower():
             return False
         if area_value.value < hard.area.min:
+            return False
+
+    if hard.floor is not None:
+        # Unknown floor passes: the old rubric's "unknown -> include, mark
+        # unverified" rule. Only a stated floor outside the bound fails.
+        floor_value = _observed_float(listing.floor)
+        if floor_value is not None and not _matches_numeric_filter(
+            floor_value,
+            eq=hard.floor.eq,
+            minimum=hard.floor.min,
+            maximum=hard.floor.max,
+        ):
+            return False
+
+    if hard.areas:
+        area_key = listing_area_key(listing)
+        if area_key is not None and area_key not in set(hard.areas):
             return False
 
     excludes = {token.strip().lower() for token in hard.exclude}
@@ -121,9 +140,22 @@ def _money_amount(listing: Listing) -> float | None:
     return None
 
 
-def _observed_float(field: Observed[float] | Absence) -> float | None:
+def _observed_float(field: Observed[float] | Observed[int] | Absence) -> float | None:
     if isinstance(field, Observed):
         return float(field.value)
+    return None
+
+
+def listing_area_key(listing: Listing) -> str | None:
+    """Return the listing's citypack area key, or None when it is unknown."""
+
+    if listing.place.area_key is not None and listing.place.area_key.strip():
+        return listing.place.area_key.strip()
+    area_key_attr = listing.attributes.get("area_key")
+    if isinstance(area_key_attr, Observed) and isinstance(area_key_attr.value, str):
+        normalized = area_key_attr.value.strip()
+        if normalized:
+            return normalized
     return None
 
 
