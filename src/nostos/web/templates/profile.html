@@ -56,7 +56,7 @@
           <label for="rent_min">Rent min <span class="pf-unit">{{ currency }}/mo</span></label>
           <input type="number" id="rent_min" name="rent_min" inputmode="decimal" step="50" min="0"
                  value="{{ sub.get('rent_min') }}" aria-describedby="rent_min_hint">
-          <small id="rent_min_hint" class="pf-hint">Optional floor — skips suspiciously cheap posts.</small>
+          <small id="rent_min_hint" class="pf-hint">Optional lower bound — skips suspiciously cheap posts.</small>
         </div>
 
         <div class="pf-field pf-field-wide">

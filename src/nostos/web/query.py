@@ -19,6 +19,8 @@ from typing import Literal
 import nostos.rank.rules as _rules
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
+from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.text import TextRuleEnricher
 from nostos.model import Area, Listing, Money, Observed, Photo, SourceRecord
 from nostos.model.source_record import JSONValue
 from nostos.rank.profile_scoring import (
@@ -80,6 +82,8 @@ def sort_label(sort: str) -> str:
 MatchStatusKind = Literal["match", "unverified", "miss"]
 STATUS_FILTER_VALUES: frozenset[str] = frozenset({"match", "unverified", "miss"})
 
+
+_WEB_ENRICHERS = (TextRuleEnricher(),)
 
 @dataclass(frozen=True, slots=True)
 class MatchStatus:
@@ -279,7 +283,9 @@ def _listing_from_record(
         listing = listing.model_copy(
             update={"identity": listing.identity.model_copy(update={"listing_id": listing_id})}
         )
-    return listing
+    # Run the same text enrichment the scorer runs so the facts row (floor,
+    # parking, laundry...) and the match status agree with the stored score.
+    return run_enricher_chain(listing, _WEB_ENRICHERS, context)
 
 
 def _action_listing_ids(

@@ -183,6 +183,13 @@ _PARKING_NEGATIVE_RE = re.compile(
     r"|\bno\s+parking\s+available\b",
     re.IGNORECASE,
 )
+# Whole-word checks for a normalized parking field such as "Available",
+# "Included", "Unavailable" or "None". Substring matching is not safe here:
+# "Unavailable" contains "available".
+_PARKING_KEYWORD_RE = re.compile(r"\b(?:available|included|yes|stall|garage)\b", re.IGNORECASE)
+_PARKING_NEGATIVE_KEYWORD_RE = re.compile(
+    r"\b(?:unavailable|none|no|not\s+available|not\s+included|n/a)\b", re.IGNORECASE
+)
 _PARKING_POSITIVE_RE = re.compile(
     r"\b(?:parking|garage|stall)\s+(?:is\s+)?(?:included|available)\b|"
     r"\b(?:includes?|comes?\s+with)\s+(?:an?\s+|one\s+)?(?:parking|garage|stall)\b|"
@@ -411,6 +418,10 @@ def _density_phrase(text: str) -> tuple[str, str] | None:
     if walkable_match is not None and sparse_match is not None:
         return "walkable", walkable_match.group(0).strip()
     return None
+
+
+def _parking_text_is_negative(text: str) -> bool:
+    return bool(_PARKING_NEGATIVE_RE.search(text) or _PARKING_NEGATIVE_KEYWORD_RE.search(text))
 
 
 def _parking_evidence(text: str) -> str | None:
@@ -701,13 +712,9 @@ def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None
     parking_field = _observed_text_field(listing.parking)
     if parking_field is not None:
         parking_text, confidence, evidence = parking_field
-        if _PARKING_NEGATIVE_RE.search(parking_text):
+        if _parking_text_is_negative(parking_text):
             return None
-        if (
-            _PARKING_POSITIVE_RE.search(parking_text)
-            or "available" in parking_text.lower()
-            or "included" in parking_text.lower()
-        ):
+        if _PARKING_POSITIVE_RE.search(parking_text) or _PARKING_KEYWORD_RE.search(parking_text):
             return _signal_from_presence(evidence or parking_text, confidence=confidence)
         return None
 
@@ -718,13 +725,9 @@ def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None
     )
     if attr_field is not None:
         parking_text, confidence, evidence = attr_field
-        if _PARKING_NEGATIVE_RE.search(parking_text):
+        if _parking_text_is_negative(parking_text):
             return None
-        if (
-            _PARKING_POSITIVE_RE.search(parking_text)
-            or "available" in parking_text.lower()
-            or "included" in parking_text.lower()
-        ):
+        if _PARKING_POSITIVE_RE.search(parking_text) or _PARKING_KEYWORD_RE.search(parking_text):
             return _signal_from_presence(evidence or parking_text, confidence=confidence)
         return None
 

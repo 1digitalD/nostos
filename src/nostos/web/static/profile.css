@@ -320,3 +320,5 @@
   .pf-actionbar { margin: 18px -16px 0; padding: 10px 16px; }
   .pf-path { flex-basis: 100%; margin-left: 0; }
 }
+
+.pf-dirty[hidden] { display: none; }

@@ -247,8 +247,7 @@ button { font: inherit; }
   border: 1px dashed var(--border);
 }
 
-.card-photo-wrap.photo-failed::after,
-.card-photo-wrap:has(.card-photo-none)::after {
+.card-photo-wrap.photo-failed::after {
   content: 'no photo';
   position: absolute;
   top: 50%;
@@ -745,7 +744,7 @@ button { font: inherit; }
 
 .cat-row {
   display: grid;
-  grid-template-columns: 84px 1fr 60px;
+  grid-template-columns: 96px 1fr 68px;
   gap: 6px;
   align-items: center;
   padding: 3px 0;
@@ -1386,3 +1385,6 @@ button { font: inherit; }
   .field-sort { min-width: 0; }
   .more-filters-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* Wider category column on the detail page, where there is room. */
+.explain-card .cat-row { grid-template-columns: 170px 1fr 90px; font-size: 13px; }
