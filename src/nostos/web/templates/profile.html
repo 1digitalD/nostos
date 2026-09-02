@@ -1,101 +1,323 @@
 {% extends "base.html" %}
 {% block title %}Ranking factors · Nostos{% endblock %}
 {% block content %}
+<link rel="stylesheet" href="/static/profile.css?v=1">
 <a class="back" href="/">← All listings</a>
 
-<section class="profile-card">
-  <header class="profile-head">
-    <h1>⚙ Ranking factors</h1>
-    <p class="profile-sub">
-      These are the criteria your match scores are computed from. Edit and
-      save — then re-run <code>nostos watch --yes</code> to apply the new weights
-      to existing listings.
-    </p>
+<section class="profile-card pf-card">
+  <header class="profile-head pf-head">
+    <div>
+      <h1>⚙ Ranking factors</h1>
+      <p class="profile-sub">
+        <strong>Hard filters remove listings. Weights re-order what's left.</strong>
+        Sign is yours: positive to prefer, negative to avoid, 0 to switch a rule off.
+        Saving re-scores every stored listing right away — no re-fetch needed.
+      </p>
+    </div>
+    <nav class="pf-nav" aria-label="Sections">
+      <a href="#hard">Hard filters</a>
+      <a href="#weights">Weights</a>
+      <a href="#areas">Areas</a>
+      <a href="#sources">Sources</a>
+    </nav>
   </header>
 
-  {% if saved %}
-    <div class="profile-banner profile-banner-ok">
-      Profile saved to <code>{{ profile_path }}</code>. Run
-      <code>nostos watch --yes</code> to re-score existing listings with the new weights.
+  {% if error %}
+    <div class="profile-banner profile-banner-err" role="alert" id="pf-error">
+      <strong>Not saved.</strong> {{ error }}
     </div>
-  {% elif error %}
-    <div class="profile-banner profile-banner-err">
-      Could not save profile: {{ error }}
+  {% endif %}
+  {% if saved or rescored is not none %}
+    <div class="profile-banner profile-banner-ok" role="status">
+      {% if saved %}Saved.{% endif %}
+      {% if rescored is not none %}Re-scored {{ rescored }} listing{{ '' if rescored == 1 else 's' }} ({{ skipped or 0 }} filtered out by hard filters).{% endif %}
+      {% if saved %}<span class="pf-banner-path">→ <code>{{ profile_path }}</code></span>{% endif %}
     </div>
   {% endif %}
 
-  <form method="post" action="/profile" class="profile-form">
-    <fieldset class="profile-section">
+  <form method="post" action="/profile" class="profile-form pf-form" id="profile-form" novalidate>
+
+    <!-- ============================== Hard filters ============================== -->
+    <fieldset class="profile-section pf-section" id="hard">
       <legend>Hard filters</legend>
-      <p class="profile-hint">Listings that fail any of these are filtered out by default. Leave blank to allow any value.</p>
-      <div class="profile-grid">
-        <label>
-          Rent max (CAD/mo)
-          <input type="number" name="rent_max" step="50" min="0"
-                 value="{{ form.hard.rent_max }}">
-        </label>
-        <label>
-          Beds (exact, or leave blank)
-          <input type="number" name="beds_eq" step="1" min="0"
-                 value="{{ form.hard.beds_eq }}">
-        </label>
-        <label>
-          Beds min
-          <input type="number" name="beds_min" step="1" min="0"
-                 value="{{ form.hard.beds_min }}">
-        </label>
-        <label>
-          Baths min
-          <input type="number" name="baths_min" step="0.5" min="0"
-                 value="{{ form.hard.baths_min }}">
-        </label>
-        <label>
-          Baths max
-          <input type="number" name="baths_max" step="0.5" min="0"
-                 value="{{ form.hard.baths_max }}">
-        </label>
-        <label>
-          Area min (sqft)
-          <input type="number" name="area_min" step="10" min="0"
-                 value="{{ form.hard.area_min }}">
-        </label>
+      <p class="profile-hint">
+        A listing that fails any of these is dropped from the ranked list entirely.
+        Leave a box blank to allow any value.
+      </p>
+
+      <div class="pf-grid">
+        <div class="pf-field">
+          <label for="rent_max">Rent max <span class="pf-unit">{{ currency }}/mo</span></label>
+          <input type="number" id="rent_max" name="rent_max" inputmode="decimal" step="50" min="0"
+                 value="{{ sub.get('rent_max') }}" aria-describedby="rent_max_hint">
+          <small id="rent_max_hint" class="pf-hint">Listings above this rent are removed.</small>
+        </div>
+        <div class="pf-field">
+          <label for="rent_min">Rent min <span class="pf-unit">{{ currency }}/mo</span></label>
+          <input type="number" id="rent_min" name="rent_min" inputmode="decimal" step="50" min="0"
+                 value="{{ sub.get('rent_min') }}" aria-describedby="rent_min_hint">
+          <small id="rent_min_hint" class="pf-hint">Optional floor — skips suspiciously cheap posts.</small>
+        </div>
+
+        <div class="pf-field pf-field-wide">
+          <span class="pf-label" id="beds_label">Beds</span>
+          <div class="pf-triple" role="group" aria-labelledby="beds_label" aria-describedby="beds_hint">
+            <label class="pf-mini">
+              <span>Exactly</span>
+              <input type="number" name="beds_eq" step="1" min="0" value="{{ sub.get('beds_eq') }}">
+            </label>
+            <label class="pf-mini">
+              <span>At least</span>
+              <input type="number" name="beds_min" step="1" min="0" value="{{ sub.get('beds_min') }}">
+            </label>
+            <label class="pf-mini">
+              <span>At most</span>
+              <input type="number" name="beds_max" step="1" min="0" value="{{ sub.get('beds_max') }}">
+            </label>
+          </div>
+          <small id="beds_hint" class="pf-hint">Fill “Exactly” <em>or</em> a range. If both are set, “Exactly” wins.</small>
+        </div>
+
+        <div class="pf-field pf-field-wide">
+          <span class="pf-label" id="baths_label">Baths</span>
+          <div class="pf-triple" role="group" aria-labelledby="baths_label" aria-describedby="baths_hint">
+            <label class="pf-mini">
+              <span>Exactly</span>
+              <input type="number" name="baths_eq" step="0.5" min="0" value="{{ sub.get('baths_eq') }}">
+            </label>
+            <label class="pf-mini">
+              <span>At least</span>
+              <input type="number" name="baths_min" step="0.5" min="0" value="{{ sub.get('baths_min') }}">
+            </label>
+            <label class="pf-mini">
+              <span>At most</span>
+              <input type="number" name="baths_max" step="0.5" min="0" value="{{ sub.get('baths_max') }}">
+            </label>
+          </div>
+          <small id="baths_hint" class="pf-hint">Half baths count as 0.5. Blank = any.</small>
+        </div>
+
+        <div class="pf-field">
+          <label for="floor_max">Floor ≤</label>
+          <input type="number" id="floor_max" name="floor_max" step="1" min="0"
+                 value="{{ sub.get('floor_max') }}" aria-describedby="floor_max_hint">
+          <small id="floor_max_hint" class="pf-hint">Unknown floor still passes; only a stated higher floor is removed.</small>
+        </div>
+        <div class="pf-field">
+          <label for="area_min">Area min <span class="pf-unit">{{ area_unit }}</span></label>
+          <input type="number" id="area_min" name="area_min" step="10" min="0"
+                 value="{{ sub.get('area_min') }}" aria-describedby="area_min_hint">
+          <small id="area_min_hint" class="pf-hint">Listings without a stated size are removed when this is set.</small>
+        </div>
+      </div>
+
+      <div class="pf-checks">
+        {% for ex in exclude_tokens %}
+          <label class="pf-check">
+            <input type="checkbox" id="{{ ex.field }}" name="{{ ex.field }}"
+                   {% if sub.checked(ex.field) %}checked{% endif %}>
+            <span>{{ ex.label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+
+      <div class="pf-subsection" id="allowed-areas">
+        <div class="pf-subhead">
+          <span class="pf-label">Allowed areas</span>
+          <span class="pf-hint">None checked = any area. A listing whose area is unknown still passes.</span>
+        </div>
+        <div class="pf-area-grid" role="group" aria-label="Allowed areas">
+          {% for area in areas %}
+            <label class="pf-check pf-area-check">
+              <input type="checkbox" name="areas" value="{{ area.key }}"
+                     {% if area.key in sub.areas %}checked{% endif %}>
+              <span class="pf-area-label">{{ area.label }}</span>
+              <span class="pf-key">{{ area.key }}</span>
+            </label>
+          {% endfor %}
+        </div>
       </div>
     </fieldset>
 
-    <fieldset class="profile-section">
-      <legend>Weights</legend>
-      <p class="profile-hint">Per-rule point values. Positive = more of this rule increases the score; negative = it decreases.</p>
-      <div class="profile-weights">
-        {% for w in form.weights %}
-          <label>
-            <span class="weight-name">{{ w.label }}</span>
-            <span class="weight-rule">{{ w.rule_key }}</span>
-            <input type="number" name="weight_{{ w.rule_key }}" step="1"
-                   value="{{ w.value }}">
-          </label>
+    <!-- ================================ Weights ================================ -->
+    <fieldset class="profile-section pf-section" id="weights">
+      <legend>Ranking weights</legend>
+      <p class="profile-hint">
+        Points a listing earns when a rule fires. Range −{{ weight_max }}…{{ weight_max }};
+        type a number for anything outside. <strong>0 = off</strong> (removed from the profile on save).
+      </p>
+
+      {% for group in rule_groups %}
+        <div class="pf-group">
+          <h3 class="pf-group-title">{{ group.label }}</h3>
+          <div class="pf-rules">
+            {% for rule in group.rules %}
+              {% if rule.scaled %}
+                <div class="pf-rule pf-rule-scaled">
+                  <div class="pf-rule-text">
+                    <label class="pf-rule-label" for="{{ rule.field }}_rate">{{ rule.label }}</label>
+                    <span class="pf-key">{{ rule.key }}</span>
+                    {% if rule.description %}<p class="pf-rule-desc" id="{{ rule.field }}_desc">{{ rule.description }}</p>{% endif %}
+                  </div>
+                  <div class="pf-scaled-inputs">
+                    <label class="pf-mini">
+                      <span>{{ rule.rate_label }}</span>
+                      <input type="number" id="{{ rule.field }}_rate" name="{{ rule.field }}_rate" step="0.5"
+                             value="{{ sub.get(rule.field ~ '_rate') }}" placeholder="0"
+                             aria-describedby="{{ rule.field }}_desc">
+                    </label>
+                    <label class="pf-mini">
+                      <span>cap (max points)</span>
+                      <input type="number" id="{{ rule.field }}_cap" name="{{ rule.field }}_cap" step="1"
+                             value="{{ sub.get(rule.field ~ '_cap') }}" placeholder="0">
+                    </label>
+                  </div>
+                </div>
+              {% else %}
+                <div class="pf-rule" data-sync>
+                  <div class="pf-rule-text">
+                    <label class="pf-rule-label" for="{{ rule.field }}">{{ rule.label }}</label>
+                    <span class="pf-key">{{ rule.key }}</span>
+                    {% if rule.description %}<p class="pf-rule-desc" id="{{ rule.field }}_desc">{{ rule.description }}</p>{% endif %}
+                  </div>
+                  <div class="pf-weight-ctl">
+                    <input type="range" class="pf-slider" min="{{ weight_min }}" max="{{ weight_max }}" step="1"
+                           value="{{ sub.get(rule.field) or 0 }}" aria-label="{{ rule.label }} slider" tabindex="-1">
+                    <input type="number" class="pf-num" id="{{ rule.field }}" name="{{ rule.field }}" step="1"
+                           value="{{ sub.get(rule.field) }}" placeholder="0"
+                           aria-describedby="{{ rule.field }}_desc">
+                    <output class="pf-state" aria-live="off"></output>
+                  </div>
+                </div>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+      {% endfor %}
+
+      <div class="pf-group">
+        <h3 class="pf-group-title">Confidence</h3>
+        <div class="pf-rules">
+          <div class="pf-rule">
+            <div class="pf-rule-text">
+              <label class="pf-rule-label" for="unverified_penalty">Unverified penalty</label>
+              <span class="pf-key">confidence.unverified_penalty</span>
+              <p class="pf-rule-desc" id="unverified_penalty_desc">
+                Points subtracted when a listing is missing data the rules need
+                (floor, area, …) so a vague post cannot out-rank a complete one. 0 = none.
+              </p>
+            </div>
+            <div class="pf-weight-ctl pf-weight-ctl-plain">
+              <input type="number" class="pf-num" id="unverified_penalty" name="unverified_penalty"
+                     step="1" min="0" value="{{ sub.get('unverified_penalty') }}" placeholder="0"
+                     aria-describedby="unverified_penalty_desc">
+            </div>
+          </div>
+        </div>
+      </div>
+    </fieldset>
+
+    <!-- ============================ Area preferences ============================ -->
+    <fieldset class="profile-section pf-section" id="areas">
+      <legend>Area preferences</legend>
+      <p class="profile-hint">
+        Bonus (or penalty) points by neighbourhood. 0 = neutral (removed on save).
+        Unlike “Allowed areas” above, this never removes a listing.
+      </p>
+      <div class="pf-rules">
+        {% for area in areas %}
+          <div class="pf-rule" data-sync>
+            <div class="pf-rule-text">
+              <label class="pf-rule-label" for="area_weight_{{ area.key }}">{{ area.label }}</label>
+              <span class="pf-key">{{ area.key }}</span>
+            </div>
+            <div class="pf-weight-ctl">
+              <input type="range" class="pf-slider" min="{{ weight_min }}" max="{{ weight_max }}" step="1"
+                     value="{{ sub.get('area_weight_' ~ area.key) or 0 }}"
+                     aria-label="{{ area.label }} slider" tabindex="-1">
+              <input type="number" class="pf-num" id="area_weight_{{ area.key }}"
+                     name="area_weight_{{ area.key }}" step="1"
+                     value="{{ sub.get('area_weight_' ~ area.key) }}" placeholder="0">
+              <output class="pf-state" aria-live="off"></output>
+            </div>
+          </div>
         {% endfor %}
       </div>
     </fieldset>
 
-    <fieldset class="profile-section">
+    <!-- ================================ Sources ================================ -->
+    <fieldset class="profile-section pf-section" id="sources">
       <legend>Sources</legend>
-      <p class="profile-hint">Disable a source to skip it during watch.</p>
-      <div class="profile-sources">
-        {% for src in form.sources %}
-          <label>
-            <input type="checkbox" name="src_{{ src.key }}"
-                   {% if src.enabled %}checked{% endif %}>
-            {{ src.label }}
+      <p class="profile-hint">Untick a source to skip it during <code>nostos watch</code>.</p>
+      <div class="profile-sources pf-checks">
+        {% for key in source_keys %}
+          <label class="pf-check">
+            <input type="checkbox" id="src_{{ key }}" name="src_{{ key }}"
+                   {% if sub.checked('src_' ~ key) %}checked{% endif %}>
+            <span>{{ key }}</span>
           </label>
         {% endfor %}
       </div>
     </fieldset>
-
-    <div class="profile-actions">
-      <button type="submit">Save</button>
-      <a class="reset" href="/">Cancel</a>
-      <span class="profile-path">profile: <code>{{ profile_path }}</code></span>
-    </div>
   </form>
+
+  <!-- Sticky action bar: Save submits the form above; Re-score is its own POST. -->
+  <div class="pf-actionbar">
+    <button type="submit" form="profile-form" class="pf-btn pf-btn-primary">Save</button>
+    <form method="post" action="/profile/rescore" class="pf-inline-form">
+      <button type="submit" class="pf-btn" title="Recompute scores for every stored listing with the saved profile">Re-score now</button>
+    </form>
+    <a class="pf-btn pf-btn-ghost" href="/profile">Reset to saved</a>
+    <span class="pf-dirty" id="pf-dirty" hidden>Unsaved changes</span>
+    <span class="profile-path pf-path">profile: <code>{{ profile_path }}</code></span>
+  </div>
 </section>
+
+<script>
+(function () {
+  var form = document.getElementById('profile-form');
+  if (!form) { return; }
+
+  // Slider <-> number two-way sync; 0 / blank reads as "off".
+  function paint(row) {
+    var slider = row.querySelector('.pf-slider');
+    var num = row.querySelector('.pf-num');
+    var state = row.querySelector('.pf-state');
+    var v = num.value.trim() === '' ? 0 : Number(num.value);
+    if (isNaN(v)) { v = 0; }
+    if (slider) {
+      var min = Number(slider.min), max = Number(slider.max);
+      slider.value = Math.max(min, Math.min(max, v));
+    }
+    row.classList.toggle('is-off', v === 0);
+    row.classList.toggle('is-neg', v < 0);
+    if (state) { state.textContent = v === 0 ? 'off' : (v > 0 ? '+' + v : String(v)); }
+  }
+  Array.prototype.forEach.call(form.querySelectorAll('[data-sync]'), function (row) {
+    var slider = row.querySelector('.pf-slider');
+    var num = row.querySelector('.pf-num');
+    if (!num) { return; }
+    if (slider) {
+      slider.addEventListener('input', function () {
+        num.value = slider.value === '0' ? '' : slider.value;
+        paint(row);
+        num.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+    num.addEventListener('input', function () { paint(row); });
+    paint(row);
+  });
+
+  // "Unsaved changes" pill.
+  var dirty = document.getElementById('pf-dirty');
+  function markDirty() { if (dirty) { dirty.hidden = false; } }
+  form.addEventListener('input', markDirty);
+  form.addEventListener('change', markDirty);
+  form.addEventListener('submit', function () { if (dirty) { dirty.hidden = true; } });
+
+  // Land on the error banner when a save was rejected.
+  var err = document.getElementById('pf-error');
+  if (err && !location.hash) { err.scrollIntoView({ block: 'start' }); }
+})();
+</script>
 {% endblock %}
