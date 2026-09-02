@@ -2,6 +2,16 @@
 {% block title %}Listings · Nostos{% endblock %}
 {% block content %}
 <section class="filter-card">
+  {% if profile_summary %}
+    <div class="profile-summary">
+      <span class="profile-summary-label">Ranking profile:</span>
+      {% for chip in profile_summary %}
+        <span class="profile-summary-chip">{{ chip }}</span>
+      {% endfor %}
+      <a class="profile-summary-edit" href="/profile" title="Edit weights, thresholds, sources">⚙ Edit</a>
+    </div>
+  {% endif %}
+
   <form method="get" action="/" class="filter-form">
     <div class="field">
       <label for="rent_min">Rent min</label>
@@ -85,12 +95,12 @@
   <div class="card-grid">
     {% for row in rows %}
       {% set state = row_actions.get(row.listing_id, {}) %}
-      {% set contributors = contributors_by_id.get(row.listing_id, []) %}
       {% set photo = row.primary_photo %}
       {% set aspect = (photo.width / photo.height) if (photo and photo.width and photo.height) else 1.33 %}
       <article class="card
                      {% if state.dismiss %}is-dismissed{% endif %}
-                     {% if state.star %}is-starred{% endif %}">
+                     {% if state.star %}is-starred{% endif %}
+                     {% if row.match_status == 'excluded' %}is-excluded{% endif %}">
 
         <a class="card-photo-wrap"
            href="/listings/{{ row.listing_id }}"
@@ -106,61 +116,98 @@
           {% else %}
             <div class="card-photo card-photo-none">no photo</div>
           {% endif %}
-
-          <div class="card-overlay">
-            <span class="score-pill {% if row.score >= 75 %}score-good{% elif row.score >= 50 %}score-mid{% else %}score-low{% endif %}">
-              {{ row.score | round(1) }}
-            </span>
-            <div class="card-actions">
-              <button type="button"
-                      class="action-btn {% if state.star %}is-on{% endif %}"
-                      data-action="star"
-                      data-listing="{{ row.listing_id }}"
-                      title="{% if state.star %}Starred — click to undo{% else %}Star this listing{% endif %}"
-                      aria-label="{% if state.star %}Starred{% else %}Star{% endif %}"
-                      aria-pressed="{{ 'true' if state.star else 'false' }}">★</button>
-              <button type="button"
-                      class="action-btn {% if state.dismiss %}is-on{% endif %}"
-                      data-action="dismiss"
-                      data-listing="{{ row.listing_id }}"
-                      title="{% if state.dismiss %}Dismissed — click to undo{% else %}Dismiss this listing{% endif %}"
-                      aria-label="{% if state.dismiss %}Dismissed{% else %}Dismiss{% endif %}"
-                      aria-pressed="{{ 'true' if state.dismiss else 'false' }}">✕</button>
-              <a class="action-btn"
-                 href="{{ row.url }}"
-                 target="_blank"
-                 rel="noopener noreferrer"
-                 title="Open original listing (acts further)"
-                 aria-label="Open original listing">↗</a>
-            </div>
-          </div>
         </a>
 
         <div class="card-body">
-          <div class="card-rent">
-            {{ row.rent_text }}
-            <span class="card-rent-unit">/mo</span>
+          <div class="card-headline">
+            <div class="card-rent">
+              {{ row.rent_text }}
+              <span class="card-rent-unit">/mo</span>
+            </div>
+            <span class="status-badge status-{{ row.match_status }}"
+                  title="{{ {'match':'Listing meets all stated profile criteria','unverified':'Some criteria-relevant fields are unstated','miss':'Listing fails at least one criterion','excluded':'You marked this listing excluded'}[row.match_status] }}">
+              {% if row.match_status == 'match' %}✓ Match{% elif row.match_status == 'unverified' %}? Unverified{% elif row.match_status == 'miss' %}✕ Miss{% elif row.match_status == 'excluded' %}⊘ Excluded{% endif %}
+            </span>
           </div>
+
           <div class="card-meta">
-            {% if row.beds is not none %}<span>{{ row.beds | int }} bed</span>{% endif %}
-            {% if row.baths is not none %}<span>{{ row.baths }} bath</span>{% endif %}
-            {% if row.area_value is not none %}<span>{{ row.area_value | int }} {{ row.area_unit or 'sqft' }}</span>{% endif %}
+            {% if row.beds is not none %}<span>🛏 {{ row.beds | round(0, 'floor') | int }} bd</span>{% endif %}
+            {% if row.baths is not none %}<span>🛁 {{ row.baths }} ba</span>{% endif %}
+            {% if row.area_value is not none %}<span>📐 {{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or 'sqft' }}</span>{% endif %}
             {% if row.area_label %}<span>{{ row.area_label }}</span>{% endif %}
           </div>
+
           <div class="card-address">
             {{ row.title or row.address or row.listing_id }}
           </div>
-          {% if contributors %}
-            <div class="card-contributors">
-              {% for c in contributors %}
-                <div class="contributor {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">
-                  <span class="contributor-mark">{% if c.contribution >= 0 %}✓{% else %}✕{% endif %}</span>
-                  <span class="contributor-label">{{ c.label }}</span>
-                  <span class="contributor-points">{{ '%+.1f'|format(c.contribution) }}</span>
+
+          <div class="card-facts">
+            {% set facts = row.facts_summary %}
+            <span class="fact {% if facts.floor.present %}has{% else %}missing{% endif %}">
+              <span class="fact-k">Floor</span>
+              <span class="fact-v">{% if facts.floor.present %}{{ facts.floor.value }}{% else %}unstated{% endif %}</span>
+            </span>
+            <span class="fact {% if facts.furnished.present %}has{% else %}missing{% endif %}">
+              <span class="fact-k">Furnished</span>
+              <span class="fact-v">{% if facts.furnished.present %}{{ facts.furnished.value }}{% else %}unstated{% endif %}</span>
+            </span>
+            <span class="fact {% if facts.parking.present %}has{% else %}missing{% endif %}">
+              <span class="fact-k">Parking</span>
+              <span class="fact-v">{% if facts.parking.present %}{{ facts.parking.value }}{% else %}unstated{% endif %}</span>
+            </span>
+            <span class="fact {% if facts.available.present %}has{% else %}missing{% endif %}">
+              <span class="fact-k">Available</span>
+              <span class="fact-v">{% if facts.available.present %}{{ facts.available.value }}{% else %}unstated{% endif %}</span>
+            </span>
+          </div>
+
+          {% if row.category_scores %}
+            <div class="cat-scores">
+              <div class="cat-scores-title">Match breakdown</div>
+              {% for cat in row.category_scores %}
+                <div class="cat-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}">
+                  <div class="cat-name">{{ cat.category }}</div>
+                  <div class="cat-bar">
+                    <div class="cat-bar-fill"
+                         style="width: {{ cat.pct | round(1) }}%"></div>
+                  </div>
+                  <div class="cat-val">
+                    {% if cat.score > 0 %}+{% endif %}{{ cat.score | round(1) }}/{{ cat.max | round(1) }}
+                  </div>
                 </div>
               {% endfor %}
             </div>
           {% endif %}
+
+          <div class="card-actions-row">
+            <button type="button"
+                    class="card-action-btn {% if state.star %}is-on{% endif %}"
+                    data-action="star"
+                    data-listing="{{ row.listing_id }}"
+                    title="{% if state.star %}Shortlisted — click to remove{% else %}Shortlist this listing{% endif %}"
+                    aria-label="Shortlist"
+                    aria-pressed="{{ 'true' if state.star else 'false' }}">★ Shortlist</button>
+            <button type="button"
+                    class="card-action-btn {% if state.dismiss %}is-on{% endif %}"
+                    data-action="dismiss"
+                    data-listing="{{ row.listing_id }}"
+                    title="{% if state.dismiss %}Dismissed — click to undo (still shown){% else %}Dismiss (still shown){% endif %}"
+                    aria-label="Dismiss"
+                    aria-pressed="{{ 'true' if state.dismiss else 'false' }}">✕ Dismiss</button>
+            <button type="button"
+                    class="card-action-btn card-action-exclude {% if state.excluded %}is-on{% endif %}"
+                    data-action="excluded"
+                    data-listing="{{ row.listing_id }}"
+                    title="{% if state.excluded %}Excluded — click to undo (will reappear){% else %}Exclude (auto-hides from list){% endif %}"
+                    aria-label="Exclude"
+                    aria-pressed="{{ 'true' if state.excluded else 'false' }}">⊘ Exclude</button>
+            <a class="card-action-btn card-action-view"
+               href="{{ row.url }}"
+               target="_blank"
+               rel="noopener noreferrer"
+               title="Open original listing in a new tab"
+               aria-label="Open original listing">↗ Open</a>
+          </div>
         </div>
 
         <div class="card-footer">
@@ -179,8 +226,9 @@
 
 <script>
 (function () {
-  // One-click star / dismiss on the card grid. Falls back to the detail page
-  // (which has its own action buttons) if the POST fails for any reason.
+  // One-click star / dismiss / exclude on the card grid. Falls back to the
+  // detail page if the POST fails for any reason. Exclude reloads home so
+  // the just-hidden listing is removed from view immediately.
   document.addEventListener('click', async function (event) {
     const btn = event.target.closest('[data-action]');
     if (!btn) return;
@@ -193,20 +241,20 @@
     try {
       const res = await fetch('/listings/' + encodeURIComponent(listingId) + '/' + action, {
         method: 'POST',
-        redirect: 'follow',
         headers: { 'X-Requested-With': 'fetch' },
       });
       if (res.ok) {
         const wasOn = btn.classList.contains('is-on');
         btn.classList.toggle('is-on');
         btn.setAttribute('aria-pressed', String(!wasOn));
-        const card = btn.closest('.card');
-        if (card) {
-          if (action === 'dismiss') {
-            card.classList.toggle('is-dismissed', !wasOn);
-          } else if (action === 'star') {
-            card.classList.toggle('is-starred', !wasOn);
+        if (action === 'excluded') {
+          // Excluding auto-hides the listing. Fade out, then reload.
+          const card = btn.closest('.card');
+          if (card) {
+            card.style.transition = 'opacity 0.2s ease';
+            card.style.opacity = '0.4';
           }
+          setTimeout(function () { window.location.href = '/'; }, 200);
         }
       } else {
         window.location.href = '/listings/' + encodeURIComponent(listingId);
@@ -214,7 +262,7 @@
     } catch (_err) {
       window.location.href = '/listings/' + encodeURIComponent(listingId);
     } finally {
-      btn.disabled = false;
+      if (action !== 'excluded') btn.disabled = false;
     }
   });
 })();
