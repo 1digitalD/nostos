@@ -63,70 +63,160 @@
     <div class="actions">
       <button type="submit">Apply</button>
       <a class="reset" href="/">Reset</a>
+      <span class="results-count">
+        {{ rows | length }} listing{{ '' if rows|length == 1 else 's' }}
+      </span>
     </div>
   </form>
-  {% if active_filters %}
-    <p class="active-summary">
-      Showing {{ rows | length }} listing(s) matching filters.
-    </p>
+
+  {% if filter_chips %}
+    <div class="filter-chips">
+      <span class="filter-chips-label">Active filters:</span>
+      {% for chip in filter_chips %}
+        <a class="chip" href="{{ chip.remove_url }}" title="Remove this filter">
+          {{ chip.label }}<span class="chip-remove">×</span>
+        </a>
+      {% endfor %}
+    </div>
   {% endif %}
 </section>
 
-<section class="result-card">
-  {% if rows %}
-    <table class="listings">
-      <thead>
-        <tr>
-          <th>Photo</th>
-          <th>Score</th>
-          <th>Address</th>
-          <th>Source</th>
-          <th>Posted</th>
-          <th>Rent</th>
-          <th>Beds/Baths</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in rows %}
-          {% set action_state = row_actions.get(row.listing_id, {}) %}
-          <tr class="{% if action_state.star %}row-starred{% elif action_state.dismiss %}row-dismissed{% endif %}">
-            <td>
-              {% if row.primary_photo %}
-                <img class="thumb" src="{{ row.primary_photo.url }}" alt="" loading="lazy">
-              {% else %}
-                <span class="thumb thumb-none">—</span>
-              {% endif %}
-            </td>
-            <td>{{ row.score | score_badge | safe }}</td>
-            <td>
-              <a class="row-title" href="/listings/{{ row.listing_id }}">
-                {{ row.title or row.address or row.listing_id }}
-              </a>
-              {% if row.address %}
-                <div class="row-address">{{ row.address }}</div>
-              {% endif %}
-              {% if action_state.star or action_state.dismiss or action_state.contact %}
-                <div class="row-badges">
-                  {% if action_state.star %}<span class="badge badge-star" title="starred">★</span>{% endif %}
-                  {% if action_state.dismiss %}<span class="badge badge-dismiss" title="dismissed">✕</span>{% endif %}
-                  {% if action_state.contact %}<span class="badge badge-contact" title="contacted">✉</span>{% endif %}
+{% if rows %}
+  <div class="card-grid">
+    {% for row in rows %}
+      {% set state = row_actions.get(row.listing_id, {}) %}
+      {% set contributors = contributors_by_id.get(row.listing_id, []) %}
+      {% set photo = row.primary_photo %}
+      {% set aspect = (photo.width / photo.height) if (photo and photo.width and photo.height) else 1.33 %}
+      <article class="card
+                     {% if state.dismiss %}is-dismissed{% endif %}
+                     {% if state.star %}is-starred{% endif %}">
+
+        <a class="card-photo-wrap"
+           href="/listings/{{ row.listing_id }}"
+           style="--photo-aspect: {{ '%.3f'|format(aspect) }};">
+          {% if photo %}
+            <img class="card-photo"
+                 src="{{ photo.url }}"
+                 alt="{{ photo.caption or '' }}"
+                 loading="lazy"
+                 width="{{ photo.width or '' }}"
+                 height="{{ photo.height or '' }}"
+                 onerror="this.parentElement.classList.add('photo-failed'); this.remove();">
+          {% else %}
+            <div class="card-photo card-photo-none">no photo</div>
+          {% endif %}
+
+          <div class="card-overlay">
+            <span class="score-pill {% if row.score >= 75 %}score-good{% elif row.score >= 50 %}score-mid{% else %}score-low{% endif %}">
+              {{ row.score | round(1) }}
+            </span>
+            <div class="card-actions">
+              <button type="button"
+                      class="action-btn {% if state.star %}is-on{% endif %}"
+                      data-action="star"
+                      data-listing="{{ row.listing_id }}"
+                      title="{% if state.star %}Starred — click to undo{% else %}Star this listing{% endif %}"
+                      aria-label="{% if state.star %}Starred{% else %}Star{% endif %}"
+                      aria-pressed="{{ 'true' if state.star else 'false' }}">★</button>
+              <button type="button"
+                      class="action-btn {% if state.dismiss %}is-on{% endif %}"
+                      data-action="dismiss"
+                      data-listing="{{ row.listing_id }}"
+                      title="{% if state.dismiss %}Dismissed — click to undo{% else %}Dismiss this listing{% endif %}"
+                      aria-label="{% if state.dismiss %}Dismissed{% else %}Dismiss{% endif %}"
+                      aria-pressed="{{ 'true' if state.dismiss else 'false' }}">✕</button>
+              <a class="action-btn"
+                 href="{{ row.url }}"
+                 target="_blank"
+                 rel="noopener noreferrer"
+                 title="Open original listing (acts further)"
+                 aria-label="Open original listing">↗</a>
+            </div>
+          </div>
+        </a>
+
+        <div class="card-body">
+          <div class="card-rent">
+            {{ row.rent_text }}
+            <span class="card-rent-unit">/mo</span>
+          </div>
+          <div class="card-meta">
+            {% if row.beds is not none %}<span>{{ row.beds | int }} bed</span>{% endif %}
+            {% if row.baths is not none %}<span>{{ row.baths }} bath</span>{% endif %}
+            {% if row.area_value is not none %}<span>{{ row.area_value | int }} {{ row.area_unit or 'sqft' }}</span>{% endif %}
+            {% if row.area_label %}<span>{{ row.area_label }}</span>{% endif %}
+          </div>
+          <div class="card-address">
+            {{ row.title or row.address or row.listing_id }}
+          </div>
+          {% if contributors %}
+            <div class="card-contributors">
+              {% for c in contributors %}
+                <div class="contributor {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">
+                  <span class="contributor-mark">{% if c.contribution >= 0 %}✓{% else %}✕{% endif %}</span>
+                  <span class="contributor-label">{{ c.label }}</span>
+                  <span class="contributor-points">{{ '%+.1f'|format(c.contribution) }}</span>
                 </div>
-              {% endif %}
-            </td>
-            <td><span class="source-tag source-{{ row.source }}">{{ row.source }}</span></td>
-            <td>{{ row.posted_at | relativetime }}</td>
-            <td>{{ row.rent_text }}</td>
-            <td>
-              {% if row.beds is not none %}{{ row.beds | round(0, 'floor') | int }}{% else %}—{% endif %}br
-              /
-              {% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}ba
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="empty">No listings match the current filters. Try widening them, or run <code>nostos watch --yes</code> first.</p>
-  {% endif %}
-</section>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="card-footer">
+          <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
+          <span class="card-updated">updated {{ row.posted_at | relativetime }}</span>
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="empty-card">
+    <p>No listings match the current filters.</p>
+    <p class="empty-hint">Try widening them, or run <code>nostos watch --yes</code> first.</p>
+  </div>
+{% endif %}
+
+<script>
+(function () {
+  // One-click star / dismiss on the card grid. Falls back to the detail page
+  // (which has its own action buttons) if the POST fails for any reason.
+  document.addEventListener('click', async function (event) {
+    const btn = event.target.closest('[data-action]');
+    if (!btn) return;
+    event.preventDefault();
+    const action = btn.getAttribute('data-action');
+    const listingId = btn.getAttribute('data-listing');
+    if (!action || !listingId) return;
+
+    btn.disabled = true;
+    try {
+      const res = await fetch('/listings/' + encodeURIComponent(listingId) + '/' + action, {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 'X-Requested-With': 'fetch' },
+      });
+      if (res.ok) {
+        const wasOn = btn.classList.contains('is-on');
+        btn.classList.toggle('is-on');
+        btn.setAttribute('aria-pressed', String(!wasOn));
+        const card = btn.closest('.card');
+        if (card) {
+          if (action === 'dismiss') {
+            card.classList.toggle('is-dismissed', !wasOn);
+          } else if (action === 'star') {
+            card.classList.toggle('is-starred', !wasOn);
+          }
+        }
+      } else {
+        window.location.href = '/listings/' + encodeURIComponent(listingId);
+      }
+    } catch (_err) {
+      window.location.href = '/listings/' + encodeURIComponent(listingId);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
 {% endblock %}

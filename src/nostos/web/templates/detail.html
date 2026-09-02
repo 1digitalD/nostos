@@ -9,6 +9,7 @@
     <p class="detail-sub">
       <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
       <span>Posted {{ row.posted_at | relativetime }}</span>
+      <span>Updated {{ row.posted_at | relativetime }}</span>
       <span>Listing ID: <code>{{ row.listing_id }}</code></span>
     </p>
   </header>
@@ -17,34 +18,28 @@
     <div class="detail-main">
       <dl class="kv">
         <dt>Score</dt>
-        <dd>{{ row.score | score_badge | safe }}</dd>
+        <dd><span class="score-pill {% if row.score >= 75 %}score-good{% elif row.score >= 50 %}score-mid{% else %}score-low{% endif %}">{{ row.score | round(1) }}</span></dd>
         <dt>Rent</dt>
         <dd>{{ row.rent_text }}</dd>
         <dt>Address</dt>
         <dd>{{ row.address or '—' }}</dd>
         <dt>Bedrooms</dt>
-        <dd>
-          {% if row.beds is not none %}{{ row.beds }}{% else %}—{% endif %}
-        </dd>
+        <dd>{% if row.beds is not none %}{{ row.beds }}{% else %}—{% endif %}</dd>
         <dt>Bathrooms</dt>
-        <dd>
-          {% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}
-        </dd>
+        <dd>{% if row.baths is not none %}{{ row.baths }}{% else %}—{% endif %}</dd>
         <dt>Area</dt>
-        <dd>
-          {% if row.area_value is not none %}{{ row.area_value }} {{ row.area_unit or '' }}{% else %}—{% endif %}
-        </dd>
+        <dd>{% if row.area_value is not none %}{{ row.area_value }} {{ row.area_unit or '' }}{% else %}—{% endif %}</dd>
         <dt>Area key</dt>
         <dd>{{ row.area_label or '—' }}</dd>
         <dt>Original URL</dt>
-        <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">{{ row.url }}</a></dd>
+        <dd><a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">Open ↗</a></dd>
       </dl>
 
       {% if row.photos %}
         <div class="photo-grid">
           {% for photo in row.photos %}
             <a class="photo-tile" href="{{ photo.url }}" target="_blank" rel="noopener noreferrer">
-              <img src="{{ photo.url }}" alt="" loading="lazy">
+              <img src="{{ photo.url }}" alt="{{ photo.caption or '' }}" loading="lazy">
             </a>
           {% endfor %}
         </div>
@@ -55,23 +50,29 @@
       <section class="actions-card">
         <h2>Actions</h2>
         <div class="action-buttons">
-          <form method="post" action="/listings/{{ row.listing_id }}/star">
-            <button type="submit" class="btn btn-star {% if action_state.starred %}is-on{% endif %}"{% if action_state.starred %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
-              ★ {% if action_state.starred %}Starred{% else %}Star{% endif %}
-            </button>
-          </form>
-          <form method="post" action="/listings/{{ row.listing_id }}/dismiss">
-            <button type="submit" class="btn btn-dismiss {% if action_state.dismissed %}is-on{% endif %}"{% if action_state.dismissed %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
-              ✕ {% if action_state.dismissed %}Dismissed{% else %}Dismiss{% endif %}
-            </button>
-          </form>
-          <form method="post" action="/listings/{{ row.listing_id }}/contacted">
-            <button type="submit" class="btn btn-contact {% if action_state.contacted %}is-on{% endif %}"{% if action_state.contacted %} disabled aria-pressed="true"{% else %} aria-pressed="false"{% endif %}>
-              ✉ {% if action_state.contacted %}Contacted{% else %}Mark contacted{% endif %}
-            </button>
-          </form>
+          <button type="button"
+                  class="btn btn-star {% if action_state.starred %}is-on{% endif %}"
+                  data-action="star"
+                  data-listing="{{ row.listing_id }}"
+                  {% if action_state.starred %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+            ★ {% if action_state.starred %}Starred{% else %}Star{% endif %}
+          </button>
+          <button type="button"
+                  class="btn btn-dismiss {% if action_state.dismissed %}is-on{% endif %}"
+                  data-action="dismiss"
+                  data-listing="{{ row.listing_id }}"
+                  {% if action_state.dismissed %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+            ✕ {% if action_state.dismissed %}Dismissed{% else %}Dismiss{% endif %}
+          </button>
+          <button type="button"
+                  class="btn btn-contact {% if action_state.contacted %}is-on{% endif %}"
+                  data-action="contacted"
+                  data-listing="{{ row.listing_id }}"
+                  {% if action_state.contacted %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+            ✉ {% if action_state.contacted %}Contacted{% else %}Mark contacted{% endif %}
+          </button>
         </div>
-        <form method="post" action="/listings/{{ row.listing_id }}/note" class="note-form">
+        <form method="post" action="/listings/{{ row.listing_id }}/note" class="note-form" data-action-form>
           <label for="note">Add a note</label>
           <textarea id="note" name="note" rows="3" maxlength="4000" placeholder="e.g. viewing scheduled Thursday 6pm"></textarea>
           <button type="submit" class="btn btn-note">Save note</button>
@@ -101,11 +102,56 @@
 
   <section class="explain-card">
     <h2>Why this score?</h2>
-    {% if breakdown %}
-      <pre class="explain-json">{{ breakdown | tojson(indent=2) }}</pre>
+    {% if breakdown_contributors %}
+      <div class="breakdown-list">
+        {% for c in breakdown_contributors %}
+          <div class="breakdown-row {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">
+            <span class="contributor-label">{{ c.label }}</span>
+            <span class="breakdown-points {% if c.contribution >= 0 %}match{% else %}miss{% endif %}">{{ '%+.1f'|format(c.contribution) }}</span>
+          </div>
+        {% endfor %}
+      </div>
+      <p class="breakdown-empty"><a href="/listings/{{ row.listing_id }}/explain.json" target="_blank" rel="noopener noreferrer">Raw JSON breakdown</a></p>
     {% else %}
-      <p class="empty-small">No score breakdown stored for this listing.</p>
+      <p class="breakdown-empty">No score breakdown stored for this listing.</p>
     {% endif %}
   </section>
 </section>
+
+<script>
+(function () {
+  document.addEventListener('click', async function (event) {
+    const btn = event.target.closest('[data-action]');
+    if (!btn) return;
+    event.preventDefault();
+    const action = btn.getAttribute('data-action');
+    const listingId = btn.getAttribute('data-listing');
+    if (!action || !listingId) return;
+
+    btn.disabled = true;
+    try {
+      const res = await fetch('/listings/' + encodeURIComponent(listingId) + '/' + action, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'fetch' },
+      });
+      if (res.ok) {
+        const wasOn = btn.classList.contains('is-on');
+        btn.classList.toggle('is-on');
+        btn.setAttribute('aria-pressed', String(!wasOn));
+        // Visual label flip on the detail buttons
+        const star = btn.classList.contains('btn-star');
+        const dismiss = btn.classList.contains('btn-dismiss');
+        const contact = btn.classList.contains('btn-contact');
+        if (star) btn.textContent = !wasOn ? '★ Starred' : '★ Star';
+        else if (dismiss) btn.textContent = !wasOn ? '✕ Dismissed' : '✕ Dismiss';
+        else if (contact) btn.textContent = !wasOn ? '✉ Contacted' : '✉ Mark contacted';
+      } else {
+        btn.disabled = false;
+      }
+    } catch (_err) {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
 {% endblock %}

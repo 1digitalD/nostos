@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -214,6 +215,13 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             row_actions = _row_action_states(
                 conn, listing_ids=tuple(row.listing_id for row in rows)
             )
+            contributors_by_id = _contributors_by_listing(
+                conn,
+                listing_ids=tuple(row.listing_id for row in rows),
+                profile_id=state.profile_id,
+                n=2,
+            )
+            filter_chips = _filter_chips(filters, known_areas(state.context))
 
         return state.templates.TemplateResponse(
             request=request,
@@ -221,8 +229,10 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             context={
                 "rows": rows,
                 "row_actions": row_actions,
+                "contributors_by_id": contributors_by_id,
                 "filters": filters,
                 "active_filters": _active_filters(filters),
+                "filter_chips": filter_chips,
                 "areas": known_areas(state.context),
                 "sources": known_sources(state.sources.values()),
                 "profile_id": state.profile_id,
@@ -253,6 +263,10 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "contacted": action_repo.has_action(listing_id=listing_id, kind="contacted"),
             }
             breakdown = _score_breakdown(conn, listing_id=listing_id, profile_id=state.profile_id)
+            breakdown_json = breakdown.get("breakdown_json") if breakdown else None
+            breakdown_contributors = (
+                _top_contributors(breakdown_json, n=8) if breakdown_json else []
+            )
 
         return state.templates.TemplateResponse(
             request=request,
@@ -263,6 +277,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "actions": actions,
                 "action_state": action_state,
                 "breakdown": breakdown,
+                "breakdown_contributors": breakdown_contributors,
                 "profile_id": state.profile_id,
             },
         )
@@ -363,6 +378,120 @@ def _score_breakdown(
         "computed_at": score_row.computed_at.astimezone(UTC).isoformat(),
         "breakdown_json": score_row.breakdown_json,
     }
+
+
+def _top_contributors(breakdown: Any, *, n: int = 2) -> list[dict[str, str | float]]:
+    """Return the top-n score contributors from a stored breakdown.
+
+    Each entry: ``{"label": str, "contribution": float, "rule_key": str}``.
+    Sorted by absolute contribution (impact) desc. Zero contributions
+    and non-numeric entries are filtered out so a card never wastes a row
+    on a rule that fired with zero weight.
+    """
+
+    if not isinstance(breakdown, Mapping):
+        return []
+    contributions = breakdown.get("contributions")
+    if not isinstance(contributions, list):
+        return []
+
+    valid: list[dict[str, str | float]] = []
+    for entry in contributions:
+        if not isinstance(entry, Mapping):
+            continue
+        contribution = entry.get("contribution")
+        if not isinstance(contribution, (int, float)) or contribution == 0:
+            continue
+        contribution_value = float(contribution)
+        label = entry.get("label") or entry.get("rule_key") or ""
+        rule_key = entry.get("rule_key") or ""
+        valid.append(
+            {
+                "label": str(label),
+                "contribution": contribution_value,
+                "rule_key": str(rule_key),
+            }
+        )
+    valid.sort(key=lambda item: abs(float(item["contribution"])), reverse=True)
+    return valid[:n]
+
+
+def _filter_chips(
+    filters: ListFilter, areas: tuple[tuple[str, str], ...]
+) -> list[dict[str, str]]:
+    """Render active filters as removable chips with a remove-URL each."""
+
+    area_labels = dict(areas)
+    chip_specs: list[tuple[str, str, Callable[[ListFilter], str]]] = [
+        ("rent_min", "rent_min", lambda f: f"rent ≥ ${int(f.rent_min or 0):,}"),
+        ("rent_max", "rent_max", lambda f: f"rent ≤ ${int(f.rent_max or 0):,}"),
+        ("beds", "beds", lambda f: f"{int(f.beds or 0)}+ beds"),
+        ("baths_min", "baths_min", lambda f: f"≥ {f.baths_min} baths"),
+        ("area_min", "area_min", lambda f: f"≥ {int(f.area_min or 0)} sqft"),
+        ("score_min", "score_min", lambda f: f"score ≥ {int(f.score_min or 0)}"),
+        ("source", "source", lambda f: f"source: {f.source or ''}"),
+        (
+            "area_name",
+            "area_name",
+            lambda f: f"area: {area_labels.get(f.area_name or '', f.area_name)}",
+        ),
+        ("sort", "sort", lambda f: f"sort: {f.sort}"),
+    ]
+
+    chips: list[dict[str, str]] = []
+    for param, _key, label_fn in chip_specs:
+        value = getattr(filters, _key)
+        if value is None:
+            continue
+        if param == "sort" and value == "score":
+            continue
+        label = label_fn(filters)
+        remove_url = _url_without_param(filters, param)
+        chips.append({"label": label, "param": param, "remove_url": remove_url})
+    chips_list: list[dict[str, str | float]] = []
+    for chip in chips:
+        chips_list.append({**chip})
+    return chips_list  # type: ignore[return-value]
+
+
+def _url_without_param(filters: ListFilter, param: str) -> str:
+    """Build a query string with the given param dropped (others preserved)."""
+
+    pairs: dict[str, object] = {
+        "rent_min": filters.rent_min,
+        "rent_max": filters.rent_max,
+        "beds": filters.beds,
+        "baths_min": filters.baths_min,
+        "area_min": filters.area_min,
+        "score_min": filters.score_min,
+        "source": filters.source,
+        "area_name": filters.area_name,
+        "sort": filters.sort,
+    }
+    pairs.pop(param, None)
+    if pairs.get("sort") == "score":
+        pairs.pop("sort", None)
+    pairs = {k: v for k, v in pairs.items() if v is not None}
+    if not pairs:
+        return "/"
+    return "/?" + urlencode(pairs)
+
+
+def _contributors_by_listing(
+    conn: Any, *, listing_ids: tuple[str, ...], profile_id: str, n: int = 2
+) -> dict[str, list[dict[str, str | float]]]:
+    """Pre-compute top-n contributors for many listings in one pass."""
+
+    result: dict[str, list[dict[str, str | float]]] = {}
+    for listing_id in listing_ids:
+        bd = _score_breakdown(conn, listing_id=listing_id, profile_id=profile_id)
+        if bd is None:
+            continue
+        breakdown = bd.get("breakdown_json")
+        contributors = _top_contributors(breakdown, n=n)
+        if contributors:
+            result[str(listing_id)] = contributors
+    return result
 
 
 __all__ = [
