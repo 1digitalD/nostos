@@ -71,6 +71,8 @@ nostos web --export ~/Desktop/listings.html   # write a self-contained HTML file
 
 The web UI binds to `127.0.0.1` only. There is no auth — it is a self-hosted single-user tool. To share a snapshot with someone on another machine, use `--export` and send the file. Action buttons (`Star` / `Dismiss` / `Contacted` / `Note`) write to a `listing_action` table so preferences persist across `nostos watch` runs.
 
+Hard filters and ranking weights are editable in the browser at `/profile`. Saving writes the profile YAML and immediately re-scores every stored listing from its latest source record — no network fetch — so the ranked list reflects the change on the next page load; listings that now fail a hard filter drop out of the list. The same re-score is available from the CLI with `nostos rank` after editing the YAML by hand.
+
 ## Development
 
 ```bash

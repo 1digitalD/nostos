@@ -38,6 +38,9 @@ class Rule:
     label: str
     detector: RuleDetector
     shape: ShapeFn
+    # One plain-language sentence for the profile editor: what fires the rule
+    # and what a positive vs negative weight means.
+    description: str = ""
 
     def shaped_magnitude(self, magnitude: float) -> float:
         shaped = self.shape(magnitude)
@@ -62,6 +65,7 @@ class RuleRegistry:
         category: str,
         label: str | None = None,
         shape: ShapeFn | None = None,
+        description: str = "",
     ) -> Callable[[DetectorT], DetectorT]:
         display = label or _humanize_rule_key(key)
         shape_fn = shape or _identity_shape
@@ -74,6 +78,7 @@ class RuleRegistry:
                     label=display,
                     detector=detector,
                     shape=shape_fn,
+                    description=description,
                 )
             )
             return detector
@@ -98,6 +103,15 @@ def _humanize_rule_key(key: str) -> str:
 
 DEFAULT_REGISTRY = RuleRegistry()
 
+# Display names for rule categories, keyed by ``Rule.category``. Used by the
+# profile editor to group rules; a category missing here falls back to its key.
+CATEGORY_LABELS: dict[str, str] = {
+    "amenities": "Amenities",
+    "space": "Space & layout",
+    "cost": "Cost",
+    "proximity": "Location & proximity",
+}
+
 
 def rule(
     key: str,
@@ -105,8 +119,15 @@ def rule(
     category: str,
     label: str | None = None,
     shape: ShapeFn | None = None,
+    description: str = "",
 ) -> Callable[[DetectorT], DetectorT]:
-    return DEFAULT_REGISTRY.rule(key, category=category, label=label, shape=shape)
+    return DEFAULT_REGISTRY.rule(
+        key,
+        category=category,
+        label=label,
+        shape=shape,
+        description=description,
+    )
 
 
 _TEXT_PART_KEYS = (
@@ -435,7 +456,15 @@ def _floor_preference_shape(raw_floor: float) -> float:
     return 1.0 / (1.0 + ((floor_value - 1.0) / 3.0))
 
 
-@rule("laundry.in_suite", category="amenities", label="In-suite laundry")
+@rule(
+    "laundry.in_suite",
+    category="amenities",
+    label="In-suite laundry",
+    description=(
+        "Fires when the listing states a washer/dryer inside the unit. "
+        "Positive weight rewards it; negative penalizes it."
+    ),
+)
 def _detect_laundry_in_suite(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _bool_attribute(
         listing,
@@ -455,7 +484,15 @@ def _detect_laundry_in_suite(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(evidence)
 
 
-@rule("laundry.building", category="amenities", label="Shared building laundry")
+@rule(
+    "laundry.building",
+    category="amenities",
+    label="Shared building laundry",
+    description=(
+        "Fires when the listing only mentions shared, coin-op or on-site building laundry. "
+        "Negative weight penalizes it (the usual choice); positive rewards it."
+    ),
+)
 def _detect_laundry_building(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _bool_attribute(
         listing,
@@ -475,7 +512,16 @@ def _detect_laundry_building(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(evidence)
 
 
-@rule("floor.low", category="space", label="Lower floor", shape=_floor_preference_shape)
+@rule(
+    "floor.low",
+    category="space",
+    label="Lower floor",
+    shape=_floor_preference_shape,
+    description=(
+        "Fires when a floor number is stated or can be read from the unit number; "
+        "lower floors score higher. Positive weight prefers low floors, negative prefers high."
+    ),
+)
 def _detect_floor_low(listing: Listing, _: RuleContext) -> Signal | None:
     floor_field = listing.floor
     if isinstance(floor_field, Observed):
@@ -503,7 +549,15 @@ def _detect_floor_low(listing: Listing, _: RuleContext) -> Signal | None:
     )
 
 
-@rule("walk.score", category="proximity", label="Walk Score")
+@rule(
+    "walk.score",
+    category="proximity",
+    label="Walk Score",
+    description=(
+        "Fires when a Walk Score (0-100) is stated; higher scores contribute more. "
+        "Positive weight rewards walkable addresses; negative penalizes them."
+    ),
+)
 def _detect_walk_score(listing: Listing, _: RuleContext) -> Signal | None:
     walk_score_attr = _numeric_attribute(
         listing,
@@ -533,7 +587,15 @@ def _detect_walk_score(listing: Listing, _: RuleContext) -> Signal | None:
     )
 
 
-@rule("space.den_or_solarium", category="space", label="Den or solarium")
+@rule(
+    "space.den_or_solarium",
+    category="space",
+    label="Den or solarium",
+    description=(
+        "Fires when the listing mentions a den or solarium. "
+        "Positive weight rewards the extra room; negative penalizes it."
+    ),
+)
 def _detect_den_or_solarium(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _bool_attribute(
         listing,
@@ -553,7 +615,15 @@ def _detect_den_or_solarium(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(match.group(0).strip())
 
 
-@rule("density.walkable", category="proximity", label="Walkable phrases")
+@rule(
+    "density.walkable",
+    category="proximity",
+    label="Walkable phrases",
+    description=(
+        "Fires on phrases like 'steps from', 'walking distance' or 'heart of' that suggest a "
+        "dense, walkable area. Positive weight rewards them; negative penalizes them."
+    ),
+)
 def _detect_walkable_phrase(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _string_attribute(
         listing,
@@ -576,7 +646,15 @@ def _detect_walkable_phrase(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(evidence)
 
 
-@rule("density.sparse", category="proximity", label="Sparse residential phrases")
+@rule(
+    "density.sparse",
+    category="proximity",
+    label="Sparse residential phrases",
+    description=(
+        "Fires on phrases like 'suburban', 'quiet neighborhood' or 'cul-de-sac' that suggest a "
+        "low-density area. Negative weight penalizes them; positive rewards a quieter setting."
+    ),
+)
 def _detect_sparse_phrase(listing: Listing, _: RuleContext) -> Signal | None:
     attr_value = _string_attribute(
         listing,
@@ -599,7 +677,15 @@ def _detect_sparse_phrase(listing: Listing, _: RuleContext) -> Signal | None:
     return _signal_from_presence(evidence)
 
 
-@rule("parking.available", category="amenities", label="Parking")
+@rule(
+    "parking.available",
+    category="amenities",
+    label="Parking",
+    description=(
+        "Fires when parking is stated as included or available (not when it is explicitly "
+        "unavailable). Positive weight rewards a parking spot; negative penalizes it."
+    ),
+)
 def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None:
     bool_value = _bool_attribute(
         listing,
@@ -649,7 +735,15 @@ def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None
     return _signal_from_presence(parking_evidence)
 
 
-@rule("pets.allowed", category="amenities", label="Pet friendly")
+@rule(
+    "pets.allowed",
+    category="amenities",
+    label="Pet friendly",
+    description=(
+        "Fires when a pet policy is stated: fully at 'pets welcome', half at 'pets considered', "
+        "zero at 'no pets'. Positive weight rewards pet-friendly units; negative avoids them."
+    ),
+)
 def _detect_pets_allowed(listing: Listing, _: RuleContext) -> Signal | None:
     policy_attr = _string_attribute(
         listing,
@@ -692,7 +786,15 @@ def _detect_pets_allowed(listing: Listing, _: RuleContext) -> Signal | None:
     return Signal(fired=True, magnitude=magnitude, confidence=1.0, evidence=evidence)
 
 
-@rule("area.over_minimum", category="space", label="Space over minimum")
+@rule(
+    "area.over_minimum",
+    category="space",
+    label="Space over minimum",
+    description=(
+        "Fires when the stated floor area exceeds the profile's hard minimum, by the excess "
+        "amount; use a scaled weight (per 100 sqft, capped). Positive rewards extra space."
+    ),
+)
 def _detect_area_over_minimum(listing: Listing, context: RuleContext) -> Signal | None:
     profile = _profile_from_context(context)
     if profile is None or profile.hard.area is None:
@@ -715,7 +817,15 @@ def _detect_area_over_minimum(listing: Listing, context: RuleContext) -> Signal 
     )
 
 
-@rule("rent.headroom", category="cost", label="Rent headroom")
+@rule(
+    "rent.headroom",
+    category="cost",
+    label="Rent headroom",
+    description=(
+        "Fires when the rent is below the profile's hard maximum, by the amount under it; "
+        "use a scaled weight (per 100 currency units, capped). Positive rewards cheaper rent."
+    ),
+)
 def _detect_rent_headroom(listing: Listing, context: RuleContext) -> Signal | None:
     profile = _profile_from_context(context)
     if profile is None or profile.hard.rent is None:
@@ -736,3 +846,20 @@ def _detect_rent_headroom(listing: Listing, context: RuleContext) -> Signal | No
         confidence=rent_field.confidence,
         evidence=rent_field.evidence or "rent headroom",
     )
+
+
+@rule(
+    "photo.present",
+    category="amenities",
+    label="Has photos",
+    description=(
+        "Fires when the listing includes at least one photo. "
+        "Positive weight rewards listings with photos; negative penalizes them."
+    ),
+)
+def _detect_photo_present(listing: Listing, _: RuleContext) -> Signal | None:
+    if not listing.photos:
+        return None
+    count = len(listing.photos)
+    noun = "photo" if count == 1 else "photos"
+    return _signal_from_presence(f"{count} {noun}")

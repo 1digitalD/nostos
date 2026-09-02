@@ -1,8 +1,16 @@
 from nostos.rank.engine import NormalizationWindow, RankEngine, RuleContribution, ScoreResult
 from nostos.rank.explain import render_score_explanation
-from nostos.rank.rules import DEFAULT_REGISTRY, Rule, RuleRegistry, Signal, rule
+from nostos.rank.rules import (
+    CATEGORY_LABELS,
+    DEFAULT_REGISTRY,
+    Rule,
+    RuleRegistry,
+    Signal,
+    rule,
+)
 
 __all__ = [
+    "CATEGORY_LABELS",
     "DEFAULT_REGISTRY",
     "NormalizationWindow",
     "RankEngine",

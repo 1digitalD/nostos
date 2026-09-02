@@ -11,6 +11,7 @@
     "laundry.in_suite": 6,
     "parking.available": 5,
     "pets.allowed": 8,
+    "photo.present": 2,
     "area.over_minimum": {"per_100_sqft": 4, "cap": 12},
     "rent.headroom": {"per_100": 1, "cap": 15}
   },

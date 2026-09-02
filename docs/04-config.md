@@ -70,10 +70,12 @@ address:
 city: vancouver
 
 hard:                           # fail these and the listing is out
-  rent:  { max: 3600, currency: CAD }
+  rent:  { min: 2500, max: 3600, currency: CAD }   # min is optional
   beds:  { eq: 2 }
   baths: { min: 1, max: 2 }
   area:  { min: 750, unit: sqft }
+  floor: { max: 12 }            # unstated floor still passes
+  areas: [downtown_van, burnaby_brentwood, kits_beach]   # citypack areas[].key
   exclude: [basement, furnished_only]
 
 weights:                        # sign and magnitude are yours
@@ -81,6 +83,7 @@ weights:                        # sign and magnitude are yours
   parking.available:  5
   pets.allowed:      +8         # flip the sign to avoid instead
   floor.low:          0         # switched off
+  photo.present:      2         # listings with at least one photo
   area.over_minimum: { per_100_sqft: 4, cap: 12 }
   rent.headroom:     { per_100: 1, cap: 15 }
 
@@ -109,6 +112,19 @@ schedule: "0 */6 * * *"
 ### Rules
 
 - **Hard filters and soft weights are separate sections.** The old `score.py` mixes them.
+- **Hard filters.** `rent` takes `max` (required) and an optional `min`; `min > max` is a
+  validation error. `beds`, `baths` and `floor` take `eq` *or* `min`/`max`. `area` takes
+  `min` + `unit`. `areas` is a list of `citypack.areas[].key` values the listing must fall
+  in; empty means any area. `exclude` accepts `basement` and `furnished_only`.
+- **Unknown passes, stated-out-of-range fails.** A listing with no stated floor or no
+  resolvable neighbourhood passes the `floor` and `areas` filters (it is shown as
+  unverified) — the old rubric's "unknown → include, mark unverified" rule. Rent, beds,
+  baths and area must be stated to pass.
+- **Editing re-scores.** Changing any hard filter or weight — in YAML followed by
+  `nostos rank`, or in the web profile editor at `/profile`, which re-scores on save —
+  recomputes every stored listing's score from its latest source record without a
+  network fetch. Listings that now fail a hard filter lose their score row and drop out
+  of the ranked list.
 - **Every weight's sign is the user's.** Pets is the canonical example: the old rubric
   hardcodes `-10` for pet-friendly, which is backwards for most renters. In this shape
   it is just a sign someone picks.
@@ -121,6 +137,30 @@ schedule: "0 */6 * * *"
 - **Shipped profiles**: a neutral `balanced.yaml`, plus `example-vancouver.yaml`
   carrying the original tuned rubric as a worked example of what a real profile looks
   like — without it being anyone's default.
+
+### Rule keys
+
+Every weight key must name a registered rule (`nostos.rank.rules.DEFAULT_REGISTRY`);
+an unknown key is an error at scoring time. Each rule carries a category, a label and a
+one-sentence description that the profile editor shows next to its weight field.
+
+| Key | Category | Fires when |
+|---|---|---|
+| `laundry.in_suite` | amenities | washer/dryer inside the unit |
+| `laundry.building` | amenities | only shared / coin-op / on-site laundry |
+| `parking.available` | amenities | parking stated as included or available |
+| `pets.allowed` | amenities | pet policy stated (1.0 welcome, 0.5 considered, 0 no pets) |
+| `photo.present` | amenities | at least one photo on the listing |
+| `floor.low` | space | floor stated or inferred from unit number; lower scores higher |
+| `space.den_or_solarium` | space | a den or solarium is mentioned |
+| `area.over_minimum` | space | floor area exceeds `hard.area.min` (scaled weight) |
+| `rent.headroom` | cost | rent is under `hard.rent.max` (scaled weight) |
+| `walk.score` | proximity | a Walk Score is stated |
+| `density.walkable` | proximity | walkable-neighbourhood phrases |
+| `density.sparse` | proximity | low-density / suburban phrases |
+
+Neighbourhood preference is not a rule: it is `area_key_weights`, added by the engine
+as a `location.area_key` contribution.
 
 ## The wizard
 
