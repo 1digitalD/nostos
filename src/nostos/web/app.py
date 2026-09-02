@@ -20,6 +20,7 @@ from nostos.config.wizard import dump_profile_yaml
 from nostos.context import SearchContext, load_search_context
 from nostos.rank import rules as rules_module
 from nostos.rank.rescore import RescoreReport, rescore_profile
+from nostos.rank.rules import DEFAULT_REGISTRY
 from nostos.sources import (
     CraigslistSource,
     KijijiSource,
@@ -31,12 +32,17 @@ from nostos.store.actions import ActionKind, ActionRepo
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ScoreRepo
 from nostos.web.query import (
+    SORT_OPTIONS,
+    STATUS_FILTER_VALUES,
     ListFilter,
     ListRow,
     known_areas,
     known_sources,
     load_detail,
+    normalize_sort,
     query_list,
+    rule_rows_from_breakdown,
+    sort_label,
 )
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -50,7 +56,26 @@ _MAX_NOTE_LEN = 4000
 # Acceptable sort keys. Anything else falls back to "score" rather than 422 —
 # invalid input is silently ignored so a stale bookmark or hand-crafted link
 # cannot break the page.
-_VALID_SORT_KEYS: frozenset[str] = frozenset({"score", "rent", "posted", "address"})
+_VALID_SORT_KEYS: frozenset[str] = frozenset(
+    {key for key, _label in SORT_OPTIONS} | {"rent", "posted"}
+)
+
+# Query parameters that make up a list-view URL, in canonical order.
+_LIST_PARAMS: tuple[str, ...] = (
+    "rent_min",
+    "rent_max",
+    "beds",
+    "baths_min",
+    "area_min",
+    "score_min",
+    "source",
+    "area_name",
+    "status",
+    "starred",
+    "hide_dismissed",
+    "show_excluded",
+    "sort",
+)
 
 
 
@@ -215,8 +240,12 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
         source: str | None = Query(default=None),
         area_name: str | None = Query(default=None),
         sort: str = Query(default="score"),
+        status: str | None = Query(default=None),
+        starred: bool = Query(default=False),
+        hide_dismissed: bool = Query(default=False),
+        show_excluded: bool = Query(default=False),
     ) -> HTMLResponse:
-        normalized_sort = sort if sort in _VALID_SORT_KEYS else "score"
+        normalized_sort = normalize_sort(sort if sort in _VALID_SORT_KEYS else None)
         filters = ListFilter(
             rent_min=rent_min,
             rent_max=rent_max,
@@ -227,7 +256,12 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             source=source or None,
             area_name=area_name or None,
             sort=normalized_sort,
+            status=status if status in STATUS_FILTER_VALUES else None,
+            starred=starred,
+            hide_dismissed=hide_dismissed,
+            show_excluded=show_excluded,
         )
+        areas = known_areas(state.context)
         with state.connect() as conn:
             rows = query_list(
                 conn,
@@ -245,8 +279,8 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 profile_id=state.profile_id,
                 n=2,
             )
-            filter_chips = _filter_chips(filters, known_areas(state.context))
-            profile_summary = _profile_summary(state.context.profile)
+            filter_chips = _filter_chips(filters, areas)
+            profile_summary = _profile_summary(state.context.profile, areas)
 
         return state.templates.TemplateResponse(
             request=request,
@@ -259,7 +293,12 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "active_filters": _active_filters(filters),
                 "filter_chips": filter_chips,
                 "profile_summary": profile_summary,
-                "areas": known_areas(state.context),
+                "areas": areas,
+                "area_chips": _area_chips(filters, areas),
+                "quick_toggles": _quick_toggles(filters),
+                "status_chips": _status_chips(filters),
+                "sort_options": SORT_OPTIONS,
+                "sort_label": sort_label(filters.sort),
                 "sources": known_sources(state.sources.values()),
                 "profile_id": state.profile_id,
             },
@@ -294,6 +333,9 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             breakdown_contributors = (
                 _top_contributors(breakdown_json, n=8) if breakdown_json else []
             )
+            rule_rows = rule_rows_from_breakdown(
+                breakdown_json if isinstance(breakdown_json, Mapping) else None
+            )
 
         return state.templates.TemplateResponse(
             request=request,
@@ -306,6 +348,8 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "breakdown": breakdown,
                 "breakdown_contributors": breakdown_contributors,
                 "category_scores": row.category_scores,
+                "rule_rows_fired": [r for r in rule_rows if r.contribution != 0.0],
+                "rule_rows_idle": [r for r in rule_rows if r.contribution == 0.0],
                 "profile_id": state.profile_id,
             },
         )
@@ -446,21 +490,117 @@ def _record_action(
 
 
 def _active_filters(filters: ListFilter) -> dict[str, object]:
+    """Return the non-default filter values keyed by URL param (sort excluded)."""
+
+    pairs = _filter_query_pairs(filters)
+    pairs.pop("sort", None)
+    return pairs
+
+
+def _filter_query_pairs(filters: ListFilter) -> dict[str, object]:
+    """Serialize a ListFilter to URL query pairs, omitting defaults."""
+
     pairs: dict[str, object] = {}
-    for name in (
-        "rent_min",
-        "rent_max",
-        "beds",
-        "baths_min",
-        "area_min",
-        "score_min",
-        "source",
-        "area_name",
-    ):
+    for name in _LIST_PARAMS:
         value = getattr(filters, name)
-        if value is not None:
+        if value is None or value is False:
+            continue
+        if name == "sort" and value == "score":
+            continue
+        if value is True:
+            pairs[name] = 1
+        elif isinstance(value, float) and value.is_integer():
+            pairs[name] = int(value)
+        else:
             pairs[name] = value
     return pairs
+
+
+def _url_with(filters: ListFilter, **overrides: object) -> str:
+    """Build a list URL from ``filters`` with some params overridden.
+
+    Pass ``None`` (or ``False``) for a param to drop it from the URL.
+    """
+
+    pairs = _filter_query_pairs(filters)
+    for key, value in overrides.items():
+        if value is None or value is False:
+            pairs.pop(key, None)
+        else:
+            pairs[key] = 1 if value is True else value
+    if not pairs:
+        return "/"
+    return "/?" + urlencode(pairs)
+
+
+def _area_chips(
+    filters: ListFilter, areas: tuple[tuple[str, str], ...]
+) -> list[dict[str, object]]:
+    """Single-select area chips: "All" plus one per citypack area."""
+
+    chips: list[dict[str, object]] = [
+        {
+            "key": "",
+            "label": "All areas",
+            "url": _url_with(filters, area_name=None),
+            "active": filters.area_name is None,
+        }
+    ]
+    for key, label in areas:
+        active = filters.area_name == key
+        chips.append(
+            {
+                "key": key,
+                "label": label,
+                # Clicking the active chip clears the selection.
+                "url": _url_with(filters, area_name=None if active else key),
+                "active": active,
+            }
+        )
+    return chips
+
+
+def _quick_toggles(filters: ListFilter) -> list[dict[str, object]]:
+    """Boolean URL toggles rendered as chips (click flips the param)."""
+
+    specs: tuple[tuple[str, str, str, bool], ...] = (
+        ("starred", "★ Shortlisted only", "Show only listings you shortlisted", filters.starred),
+        ("hide_dismissed", "Hide dismissed", "Drop listings you dismissed", filters.hide_dismissed),
+        ("show_excluded", "Show excluded", "Include listings you excluded", filters.show_excluded),
+    )
+    return [
+        {
+            "param": param,
+            "label": label,
+            "title": title,
+            "active": active,
+            "url": _url_with(filters, **{param: not active}),
+        }
+        for param, label, title, active in specs
+    ]
+
+
+def _status_chips(filters: ListFilter) -> list[dict[str, object]]:
+    """Match-status filter chips (single-select, click again to clear)."""
+
+    specs: tuple[tuple[str, str, str], ...] = (
+        ("match", "✓ Match", "Only listings that meet every hard criterion"),
+        ("unverified", "? Unverified", "Only listings missing data for a criterion"),
+        ("miss", "✕ Miss", "Only listings that fail a hard criterion"),
+    )
+    chips: list[dict[str, object]] = []
+    for value, label, title in specs:
+        active = filters.status == value
+        chips.append(
+            {
+                "value": value,
+                "label": label,
+                "title": title,
+                "active": active,
+                "url": _url_with(filters, status=None if active else value),
+            }
+        )
+    return chips
 
 
 def _row_action_states(
@@ -549,13 +689,17 @@ def _filter_chips(
             "area_name",
             lambda f: f"area: {area_labels.get(f.area_name or '', f.area_name)}",
         ),
-        ("sort", "sort", lambda f: f"sort: {f.sort}"),
+        ("status", "status", lambda f: f"status: {f.status or ''}"),
+        ("starred", "starred", lambda f: "shortlisted only"),
+        ("hide_dismissed", "hide_dismissed", lambda f: "dismissed hidden"),
+        ("show_excluded", "show_excluded", lambda f: "excluded shown"),
+        ("sort", "sort", lambda f: f"sort: {sort_label(f.sort)}"),
     ]
 
     chips: list[dict[str, str]] = []
     for param, _key, label_fn in chip_specs:
         value = getattr(filters, _key)
-        if value is None:
+        if value is None or value is False:
             continue
         if param == "sort" and value == "score":
             continue
@@ -564,63 +708,92 @@ def _filter_chips(
         chips.append({"label": label, "param": param, "remove_url": remove_url})
     return chips
 
-def _profile_summary(profile: Profile) -> list[str]:
-    """Render the active profile's hard filters as a row of inline chips.
+def _numeric_filter_chip(unit: str, eq: float | None, lo: float | None, hi: float | None) -> str:
+    if eq is not None:
+        return f"{eq:g} {unit}"
+    bits: list[str] = []
+    if lo is not None:
+        bits.append(f"≥ {lo:g}")
+    if hi is not None:
+        bits.append(f"≤ {hi:g}")
+    return f"{unit} " + " ".join(bits) if bits else unit
 
-    Surfaces WHAT the ranking uses (rent.max, beds, baths, area.min,
-    enabled sources) — the user should see these at a glance and have a
-    single click to edit them.
+
+def _signed(value: float) -> str:
+    """Format a weight with a proper minus sign (−) rather than a hyphen."""
+
+    text = f"{abs(value):g}"
+    return f"+{text}" if value >= 0 else f"−{text}"
+
+
+def _profile_summary(
+    profile: Profile, areas: tuple[tuple[str, str], ...] = ()
+) -> list[dict[str, str]]:
+    """Render the active profile as inline chips: hard filters, then top weights.
+
+    Each chip is ``{"label": str, "kind": "hard" | "weight"}``. Surfaces WHAT
+    the ranking uses so the user sees it at a glance and has one click to
+    edit it. Weight labels come from the rule registry (fallback: the key);
+    area-key weights use the citypack area label.
     """
 
-    chips: list[str] = []
+    chips: list[dict[str, str]] = []
     hard = profile.hard
-    if hard.rent is not None and hard.rent.max is not None:
-        chips.append(f"rent ≤ ${int(hard.rent.max):,}")
-    if hard.beds is not None:
-        if hard.beds.eq is not None:
-            chips.append(f"{int(hard.beds.eq)} bd exactly")
-        elif hard.beds.min is not None:
-            chips.append(f"≥ {int(hard.beds.min)} bd")
-    if hard.baths is not None:
-        if hard.baths.eq is not None:
-            chips.append(f"{hard.baths.eq} ba exactly")
+    if hard.rent is not None:
+        if hard.rent.min is not None:
+            chips.append({"label": f"rent ${int(hard.rent.min):,}–${int(hard.rent.max):,}",
+                          "kind": "hard"})
         else:
-            bits: list[str] = []
-            if hard.baths.min is not None:
-                bits.append(f"≥ {hard.baths.min}")
-            if hard.baths.max is not None:
-                bits.append(f"≤ {hard.baths.max}")
-            if bits:
-                chips.append("ba " + " ".join(bits))
-    if hard.area is not None and hard.area.min is not None:
-        chips.append(f"≥ {int(hard.area.min)} {hard.area.unit}")
+            chips.append({"label": f"rent ≤ ${int(hard.rent.max):,}", "kind": "hard"})
+    if hard.beds is not None:
+        chips.append({
+            "label": _numeric_filter_chip("bd", hard.beds.eq, hard.beds.min, hard.beds.max),
+            "kind": "hard",
+        })
+    if hard.baths is not None:
+        chips.append({
+            "label": _numeric_filter_chip("ba", hard.baths.eq, hard.baths.min, hard.baths.max),
+            "kind": "hard",
+        })
+    if hard.area is not None:
+        chips.append({"label": f"≥ {int(hard.area.min)} {hard.area.unit}", "kind": "hard"})
+    if hard.floor is not None:
+        chips.append({
+            "label": _numeric_filter_chip("floor", hard.floor.eq, hard.floor.min, hard.floor.max),
+            "kind": "hard",
+        })
+    if hard.areas:
+        count = len(hard.areas)
+        chips.append({"label": f"{count} area{'' if count == 1 else 's'}", "kind": "hard"})
+    for token in hard.exclude:
+        chips.append({"label": f"no {token.replace('_', ' ')}", "kind": "hard"})
+
+    area_labels = dict(areas)
+    weighted: list[tuple[str, float]] = []
+    for key, value in profile.weights.items():
+        scalar = float(value.cap) if isinstance(value, ScaledWeight) else float(value)
+        if scalar == 0:
+            continue
+        registered = DEFAULT_REGISTRY.get(key)
+        weighted.append((registered.label if registered is not None else key, scalar))
+    for area_key, value in profile.area_key_weights.items():
+        if value == 0:
+            continue
+        weighted.append((area_labels.get(area_key, area_key), float(value)))
+    weighted.sort(key=lambda item: abs(item[1]), reverse=True)
+    for label, value in weighted[:3]:
+        chips.append({"label": f"{label} {_signed(value)}", "kind": "weight"})
+
     enabled_sources = sorted(k for k, v in profile.sources.items() if v)
     if enabled_sources:
-        chips.append("sources: " + " + ".join(enabled_sources))
+        chips.append({"label": "sources: " + " + ".join(enabled_sources), "kind": "hard"})
     return chips
 
 
 def _url_without_param(filters: ListFilter, param: str) -> str:
     """Build a query string with the given param dropped (others preserved)."""
 
-    pairs: dict[str, object] = {
-        "rent_min": filters.rent_min,
-        "rent_max": filters.rent_max,
-        "beds": filters.beds,
-        "baths_min": filters.baths_min,
-        "area_min": filters.area_min,
-        "score_min": filters.score_min,
-        "source": filters.source,
-        "area_name": filters.area_name,
-        "sort": filters.sort,
-    }
-    pairs.pop(param, None)
-    if pairs.get("sort") == "score":
-        pairs.pop("sort", None)
-    pairs = {k: v for k, v in pairs.items() if v is not None}
-    if not pairs:
-        return "/"
-    return "/?" + urlencode(pairs)
+    return _url_with(filters, **{param: None})
 
 
 def _contributors_by_listing(
