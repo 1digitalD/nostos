@@ -131,8 +131,8 @@ def test_listing_correction_and_research_workflow(
     research = client.get(f"/listings/{first}/research")
     assert research.status_code == 200
     assert "Possible matching advertisements" in research.text
-    assert "Research ready" in research.text
-    assert "0</strong><span>recent web findings" in research.text
+    assert "Building evidence" in research.text
+    assert "0</strong><span>matching source excerpts" in research.text
     assert second in research.text
     assert "unit-b" in research.text
     assert "Address research" in research.text
@@ -150,7 +150,7 @@ def test_listing_correction_and_research_workflow(
         calls += 1
         return {
             "provider": "perplexity",
-            "fetched_at": "2026-09-06T00:00:00+00:00",
+            "fetched_at": datetime.now(UTC).isoformat(),
             "filtered_stale_count": 3,
             "results": [{
                 "topic": "Building management",
@@ -169,7 +169,7 @@ def test_listing_correction_and_research_workflow(
     assert calls == 1
 
     compiled_page = client.get(f"/listings/{first}/research")
-    assert "1</strong><span>recent web findings" in compiled_page.text
+    assert "1</strong><span>matching source excerpts" in compiled_page.text
     assert "Current building management review" in compiled_page.text
     assert "Example Local News" in compiled_page.text
     assert "2026-08-15" in compiled_page.text

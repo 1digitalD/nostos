@@ -49,7 +49,13 @@ from nostos.web.query import (
     rule_rows_from_breakdown,
     sort_label,
 )
-from nostos.web.research import ResearchProvider, compile_web_research, nearby_places
+from nostos.web.research import (
+    ResearchProvider,
+    compile_web_research,
+    nearby_places,
+    normalize_research_subject,
+    research_cache_key,
+)
 from nostos.workflows import (
     CorrectionField,
     ManualListing,
@@ -262,6 +268,26 @@ def _research_subject(address: str | None, title: str | None, listing_id: str) -
     if title_address is not None:
         return title_address.group(0).strip()
     return title_value or listing_id
+
+
+def _research_identity(row: ListRow, city: str) -> str | None:
+    override = row.listing.attributes.get("research_address")
+    if isinstance(override, Observed):
+        return normalize_research_subject(str(override.value), city)
+    return normalize_research_subject(row.address or "", city) or normalize_research_subject(
+        row.title or "", city
+    )
+
+
+def _research_cache_current(run: dict[str, object] | None, subject: str | None, city: str) -> bool:
+    if run is None or subject is None or run.get("cache_key") != research_cache_key(subject, city):
+        return False
+    try:
+        fetched_at = datetime.fromisoformat(str(run["fetched_at"]))
+        age = datetime.now(UTC) - fetched_at.astimezone(UTC)
+        return timedelta(0) <= age < timedelta(hours=24)
+    except (ValueError, KeyError):
+        return False
 
 
 class AppState:
@@ -687,7 +713,11 @@ def create_app(
                 "FROM source_record GROUP BY source ORDER BY source"
             ).fetchall()
             web_research_run, web_research_results = ResearchRepo(conn).get(listing_id)
-        subject = _research_subject(row.address, row.title, listing_id)
+        city = state.context.profile.city
+        subject = _research_identity(row, city)
+        cache_current = _research_cache_current(web_research_run, subject, city)
+        if not cache_current:
+            web_research_run, web_research_results = None, []
         return state.templates.TemplateResponse(
             request=request,
             name="research.html",
@@ -695,9 +725,10 @@ def create_app(
                 "row": row,
                 "listing_id": listing_id,
                 "related": related,
-                "research_subject": subject,
-                "research_subject_precise": _looks_like_street_address(subject),
-                "research_sections": _research_sections(subject, state.context.profile.city),
+                "research_subject": subject or "Exact street address needed",
+                "research_subject_precise": subject is not None,
+                "research_address_error": request.query_params.get("address_error"),
+                "research_sections": _research_sections(subject, city) if subject else [],
                 "checked_records": checked_records,
                 "source_counts": [
                     {"source": str(item["source"]), "count": int(item["count"])}
@@ -706,7 +737,7 @@ def create_app(
                 "missing_facts": _missing_research_facts(row),
                 "web_research_run": web_research_run,
                 "web_research_results": web_research_results,
-                "web_research_auto_start": web_research_run is None,
+                "web_research_auto_start": subject is not None and not cache_current,
                 "profile_id": state.profile_id,
             },
         )
@@ -728,20 +759,25 @@ def create_app(
             cached_run, cached_results = ResearchRepo(conn).get(listing_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Listing not found")
-        if cached_run is not None and not force:
-            fetched_at = datetime.fromisoformat(str(cached_run["fetched_at"]))
-            if datetime.now(UTC) - fetched_at.astimezone(UTC) < timedelta(hours=24):
-                return JSONResponse(
-                    {"status": "cached", "count": len(cached_results), "reload": False}
-                )
-        subject = _research_subject(row.address, row.title, listing_id)
+        city = state.context.profile.city
+        subject = _research_identity(row, city)
+        if subject is None:
+            return JSONResponse(
+                {"status": "needs_address",
+                 "message": "Enter the exact street address to research this building.",
+                 "reload": False}, status_code=422,
+            )
+        if not force and _research_cache_current(cached_run, subject, city):
+            return JSONResponse(
+                {"status": "cached", "count": len(cached_results), "reload": False}
+            )
         try:
             compiled = compile_web_research(
                 subject,
                 state.context.profile.city,
                 provider=research_provider,
             )
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             return JSONResponse(
                 {"status": "error", "message": str(exc), "reload": False},
                 status_code=502,
@@ -750,15 +786,29 @@ def create_app(
         if not isinstance(results, list):
             results = []
         with state.connect() as conn:
+            current_row = load_detail(
+                conn, listing_id=listing_id, context=state.context,
+                profile_id=state.profile_id, sources=state.sources,
+            )
+            if current_row is None or _research_identity(current_row, city) != subject:
+                return JSONResponse(
+                    {"status": "error",
+                     "message": "The address changed during research. Refresh for the new address.",
+                     "reload": False},
+                    status_code=409,
+                )
             ResearchRepo(conn).replace_results(
                 listing_id=listing_id,
                 subject=subject,
                 provider=str(compiled["provider"]),
-                status="complete" if results else "empty",
-                error=None,
+                status=("partial" if compiled.get("partial_errors")
+                        else ("complete" if results else "empty")),
+                error="; ".join(compiled.get("partial_errors", [])) or None,
                 fetched_at=str(compiled["fetched_at"]),
                 filtered_stale_count=int(compiled["filtered_stale_count"]),
                 results=cast(list[dict[str, str]], results),
+                cache_key=research_cache_key(subject, city),
+                filtered_irrelevant_count=int(compiled.get("filtered_irrelevant_count", 0)),
             )
         return JSONResponse(
             {
@@ -768,6 +818,25 @@ def create_app(
                 "reload": True,
             }
         )
+
+    @app.post("/listings/{listing_id}/research-address")
+    def research_address(
+        listing_id: str, state: StateDep, address: Annotated[str, Form(...)],
+    ) -> RedirectResponse:
+        normalized = normalize_research_subject(address, state.context.profile.city)
+        if normalized is None:
+            return RedirectResponse(
+                url=f"/listings/{listing_id}/research?" + urlencode(
+                    {"address_error": "Enter a street number and street name in this city."}
+                ), status_code=303,
+            )
+        with state.connect() as conn:
+            correct_listing_fact(
+                conn, listing_id=listing_id, field="research_address", value=normalized,
+                currency=state.context.citypack.locale.currency,
+                area_unit=state.context.citypack.locale.area_unit,
+            )
+        return RedirectResponse(url=f"/listings/{listing_id}/research", status_code=303)
 
     @app.post("/listings/{listing_id}/nearby.json", response_class=JSONResponse)
     def nearby_listing(listing_id: str, state: StateDep) -> JSONResponse:

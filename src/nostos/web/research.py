@@ -15,10 +15,126 @@ import httpx
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _RADIUS_METRES = 1500
+RESEARCH_RELEVANCE_VERSION = "address-v2"
+_SEARCH_RESULT_LIMIT = 5
+_MAX_ACCEPTED_RESULTS = 10
+_SUPPORTED_RESEARCH_CITIES = frozenset({"toronto", "vancouver"})
 _EXTERNAL_WRAPPER_RE = re.compile(
     r"<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>|Source: Web Search\s*---",
     re.IGNORECASE,
 )
+
+_STREET_TYPE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"boulevard|blvd\.?", "Boulevard"),
+    (r"avenue|ave\.?", "Avenue"),
+    (r"street|st\.?", "Street"),
+    (r"road|rd\.?", "Road"),
+    (r"drive|dr\.?", "Drive"),
+    (r"lane|ln\.?", "Lane"),
+    (r"court|ct\.?", "Court"),
+    (r"crescent|cres\.?", "Crescent"),
+    (r"place|pl\.?", "Place"),
+    (r"terrace|ter\.?", "Terrace"),
+    (r"highway|hwy\.?", "Highway"),
+    (r"parkway|pkwy\.?", "Parkway"),
+    (r"trail|trl\.?", "Trail"),
+    (r"way", "Way"),
+)
+_STREET_TYPES = {
+    spelling.rstrip("."): canonical
+    for pattern, canonical in _STREET_TYPE_PATTERNS
+    for spelling in pattern.replace("\\.?", "").split("|")
+}
+_DIRECTIONS = {
+    "n": "North",
+    "north": "North",
+    "s": "South",
+    "south": "South",
+    "e": "East",
+    "east": "East",
+    "w": "West",
+    "west": "West",
+}
+_STREET_TYPE_PATTERN = "|".join(pattern for pattern, _ in _STREET_TYPE_PATTERNS)
+_DIRECTION_PATTERN = "|".join(_DIRECTIONS)
+_RESEARCH_ADDRESS_RE = re.compile(
+    rf"(?<!\d)(?P<number>\d{{1,6}})\s+"
+    rf"(?:(?P<prefix>{_DIRECTION_PATTERN})\.?\s+)?"
+    rf"(?P<name>[A-Za-z0-9][A-Za-z0-9 .'-]{{0,70}}?)\s+"
+    rf"(?P<street_type>{_STREET_TYPE_PATTERN})"
+    rf"(?:\s+(?P<suffix>{_DIRECTION_PATTERN})\.?)?(?=$|[^A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _canonical_city(city: str) -> str | None:
+    cleaned = " ".join(str(city or "").strip(" ,.;:").split())
+    if not cleaned or len(cleaned) > 80:
+        return None
+    if not re.search(r"[A-Za-z]", cleaned):
+        return None
+    return cleaned.title()
+
+
+def _canonical_address_match(match: re.Match[str]) -> str:
+    street_type = _STREET_TYPES[match.group("street_type").casefold().rstrip(".")]
+    prefix = _DIRECTIONS.get((match.group("prefix") or "").casefold().rstrip("."))
+    suffix = _DIRECTIONS.get((match.group("suffix") or "").casefold().rstrip("."))
+    name = " ".join(match.group("name").split()).strip(" ,.;:-").title()
+    name = re.sub(
+        r"\b(\d+)(St|Nd|Rd|Th)\b",
+        lambda ordinal: ordinal.group(1) + ordinal.group(2).casefold(),
+        name,
+    )
+    parts = [match.group("number"), *(item for item in (prefix, name) if item), street_type]
+    if suffix:
+        parts.append(suffix)
+    return " ".join(parts)
+
+
+def normalize_research_subject(subject: str, city: str) -> str | None:
+    """Return the first precise canonical street address, without unit or locality text."""
+
+    normalized_city = _canonical_city(city)
+    if normalized_city is None:
+        return None
+    value = " ".join(str(subject or "").split())[:500]
+    for number_pair in re.finditer(
+        r"\b(?P<first>\d{1,6})\s*(?P<separator>[-–—/&]|\b(?:and|to)\b)\s*"
+        r"(?P<second>\d{1,6})\b",
+        value,
+        re.IGNORECASE,
+    ):
+        first_number = int(number_pair.group("first"))
+        second_number = int(number_pair.group("second"))
+        separator = number_pair.group("separator")
+        is_probable_unit = separator in {"-", "–", "—"} and first_number > second_number
+        if not is_probable_unit:
+            return None
+    match = _RESEARCH_ADDRESS_RE.search(value)
+    if match is None:
+        return None
+    address_context = f"{value[: match.start()]} {value[match.end() :]}"
+    expected_city = normalized_city.casefold()
+    if any(
+        supported_city != expected_city and _contains_city(address_context, supported_city)
+        for supported_city in _SUPPORTED_RESEARCH_CITIES
+    ):
+        return None
+    return _canonical_address_match(match)
+
+
+def research_cache_key(subject: str, city: str) -> str:
+    """Return the relevance-versioned identity for one address research report."""
+
+    normalized_subject = normalize_research_subject(subject, city)
+    normalized_city = _canonical_city(city)
+    if normalized_subject is None or normalized_city is None:
+        raise ValueError("A precise street address and city are required for web research.")
+    return (
+        f"{RESEARCH_RELEVANCE_VERSION}|{normalized_city.casefold()}|"
+        f"{normalized_subject.casefold()}"
+    )
 
 
 def _distance_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -248,42 +364,119 @@ def _published_date(value: object) -> date:
         return datetime.strptime(raw, "%m/%d/%Y").date()
 
 
+def _address_identity(match: re.Match[str]) -> tuple[str, str, str, str]:
+    street_type = _STREET_TYPES[match.group("street_type").casefold().rstrip(".")]
+    direction = match.group("suffix") or match.group("prefix") or ""
+    canonical_direction = _DIRECTIONS.get(direction.casefold().rstrip("."), "")
+    name = " ".join(match.group("name").casefold().split()).strip(" ,.;:-")
+    return match.group("number"), name, street_type.casefold(), canonical_direction.casefold()
+
+
+def _contains_city(value: str, city: str) -> bool:
+    value_tokens = re.findall(r"[a-z0-9]+", value.casefold())
+    city_tokens = re.findall(r"[a-z0-9]+", city.casefold())
+    if not city_tokens:
+        return False
+    width = len(city_tokens)
+    return any(
+        value_tokens[index : index + width] == city_tokens
+        for index in range(len(value_tokens))
+    )
+
+
+def _match_reason(title: str, excerpt: str, *, subject: str, city: str) -> str | None:
+    subject_match = _RESEARCH_ADDRESS_RE.search(subject)
+    if subject_match is None:
+        return None
+    expected = _address_identity(subject_match)
+    field_values = (("title", title), ("excerpt", excerpt))
+    identities_by_field = {
+        label: [_address_identity(match) for match in _RESEARCH_ADDRESS_RE.finditer(value)]
+        for label, value in field_values
+    }
+    if any(
+        identity != expected
+        for identities in identities_by_field.values()
+        for identity in identities
+    ):
+        return None
+    fields = [
+        label
+        for label, value in (("title", title), ("excerpt", excerpt))
+        if expected in identities_by_field[label] and _contains_city(value, city)
+    ]
+    if not fields:
+        return None
+    return f"Normalized address and city appear together in the source {' and '.join(fields)}."
+
+
+def _search_error(label: str, exc: Exception) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        detail = "the provider timed out"
+    else:
+        detail = "the provider request failed"
+    return f"{label} search failed: {detail}."
+
+
 def compile_web_research(
     subject: str,
     city: str,
     *,
     provider: ResearchProvider | None = None,
 ) -> dict[str, Any]:
-    """Compile one bounded address search through a pluggable provider."""
+    """Compile bounded, exact-address source excerpts through a pluggable provider."""
 
     now = datetime.now(UTC)
     cutoff = now.date() - timedelta(days=730)
-    query = (
-        f'"{subject[:160]}" {city} property management building reviews safety incidents '
-        "neighbourhood amenities gym grocery transit parks"
+    normalized_subject = normalize_research_subject(subject, city)
+    normalized_city = _canonical_city(city)
+    if normalized_subject is None or normalized_city is None:
+        raise ValueError("A precise street address and city are required for web research.")
+    active_provider = provider or configured_research_provider()
+    searches = (
+        ("Address", f'"{normalized_subject}" "{normalized_city}"'),
+        (
+            "Management and reviews",
+            f'"{normalized_subject}" "{normalized_city}" property management building reviews',
+        ),
+        (
+            "Safety",
+            f'"{normalized_subject}" "{normalized_city}" safety incidents fire police',
+        ),
     )
-    try:
-        active_provider = provider or configured_research_provider()
-        raw_results = active_provider.search(
-            query,
-            limit=10,
-            date_after=cutoff.isoformat(),
-            date_before=now.date().isoformat(),
-        )
-    except httpx.TimeoutException as exc:
-        raise RuntimeError("The research provider timed out.") from exc
-    except httpx.HTTPError as exc:
-        raise RuntimeError("The research provider request failed.") from exc
+    raw_batches: list[list[dict[str, Any]]] = []
+    partial_errors: list[str] = []
+    for label, query in searches:
+        try:
+            batch = active_provider.search(
+                query,
+                limit=_SEARCH_RESULT_LIMIT,
+                date_after=cutoff.isoformat(),
+                date_before=now.date().isoformat(),
+            )
+            if not isinstance(batch, list):
+                raise RuntimeError("the provider returned an invalid result list")
+            raw_batches.append(batch[:_SEARCH_RESULT_LIMIT])
+        except Exception as exc:
+            partial_errors.append(_search_error(label, exc))
+    if not raw_batches:
+        raise RuntimeError("The research provider failed for all focused searches.")
+
     results: list[dict[str, str]] = []
     filtered_stale = 0
+    filtered_irrelevant = 0
     seen_urls: set[str] = set()
-    for raw in raw_results:
+    processed_urls: set[str] = set()
+    for raw in (item for batch in raw_batches for item in batch):
         if not isinstance(raw, dict):
             continue
         url = str(raw.get("url") or "").strip()
         parsed_url = urlparse(url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
             continue
+        if url in processed_urls:
+            continue
+        processed_urls.add(url)
         published_raw = str(raw.get("date") or raw.get("published") or "").strip()
         try:
             published = _published_date(published_raw)
@@ -297,6 +490,15 @@ def compile_web_research(
         excerpt = _clean_external_text(raw.get("snippet") or raw.get("description"), limit=700)
         if not url or not title or url in seen_urls:
             continue
+        match_reason = _match_reason(
+            title,
+            excerpt,
+            subject=normalized_subject,
+            city=normalized_city,
+        )
+        if match_reason is None:
+            filtered_irrelevant += 1
+            continue
         seen_urls.add(url)
         results.append(
             {
@@ -308,11 +510,17 @@ def compile_web_research(
                 or "Web",
                 "published_at": published.isoformat(),
                 "excerpt": excerpt or "No excerpt was provided by the search source.",
+                "match_reason": match_reason,
             }
         )
+        if len(results) >= _MAX_ACCEPTED_RESULTS:
+            break
     return {
         "provider": active_provider.name,
         "fetched_at": now.isoformat(),
         "filtered_stale_count": filtered_stale,
+        "filtered_irrelevant_count": filtered_irrelevant,
+        "partial_errors": partial_errors,
+        "subject": normalized_subject,
         "results": results,
     }

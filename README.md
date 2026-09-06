@@ -118,6 +118,15 @@ snapshot, use `--export`. Listing actions and hunt stages persist across watch r
 Listing detail pages also support user corrections with reset, and a research workspace
 for matching stored ads, nearby services, and compiled recent address research.
 
+Building research requires an exact street address. You can set or correct its research
+address in the workspace without changing the source map pin. Three focused searches
+look for the address, management/reviews, and safety; accepted excerpts must explicitly
+match the street and city and have a date within two years. Results explain the match
+and remain source claims rather than verified facts. Unrelated evidence is excluded,
+and missing evidence does not establish safety. Reports expire after 24 hours and are
+invalidated when the address or relevance rules change. See
+[requirements and acceptance checks](docs/12-research-relevance.md).
+
 Compiled research is independent of any agent host. The built-in standalone provider
 uses Perplexity's structured Search API when `NOSTOS_PERPLEXITY_API_KEY` is set. You can
 put local service credentials in `~/.config/nostos/research.env` instead of a LaunchAgent

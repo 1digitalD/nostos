@@ -163,14 +163,16 @@ class ResearchRepo:
         fetched_at: str,
         filtered_stale_count: int,
         results: list[dict[str, str]],
+        cache_key: str = "",
+        filtered_irrelevant_count: int = 0,
     ) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM research_result WHERE listing_id=?", (listing_id,))
             self._conn.executemany(
                 """
                 INSERT INTO research_result(
-                    listing_id,topic,title,url,source,published_at,excerpt,fetched_at
-                ) VALUES (?,?,?,?,?,?,?,?)
+                    listing_id,topic,title,url,source,published_at,excerpt,fetched_at,match_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 [
                     (
@@ -182,6 +184,7 @@ class ResearchRepo:
                         item["published_at"],
                         item["excerpt"],
                         fetched_at,
+                        item.get("match_reason", ""),
                     )
                     for item in results
                 ],
@@ -190,13 +193,15 @@ class ResearchRepo:
                 """
                 INSERT INTO research_run(
                     listing_id,subject,provider,status,error,fetched_at,
-                    result_count,filtered_stale_count
-                ) VALUES (?,?,?,?,?,?,?,?)
+                    result_count,filtered_stale_count,cache_key,filtered_irrelevant_count
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(listing_id) DO UPDATE SET
                     subject=excluded.subject,provider=excluded.provider,status=excluded.status,
                     error=excluded.error,fetched_at=excluded.fetched_at,
                     result_count=excluded.result_count,
-                    filtered_stale_count=excluded.filtered_stale_count
+                    filtered_stale_count=excluded.filtered_stale_count,
+                    cache_key=excluded.cache_key,
+                    filtered_irrelevant_count=excluded.filtered_irrelevant_count
                 """,
                 (
                     listing_id,
@@ -207,6 +212,8 @@ class ResearchRepo:
                     fetched_at,
                     len(results),
                     filtered_stale_count,
+                    cache_key,
+                    filtered_irrelevant_count,
                 ),
             )
 
@@ -216,7 +223,7 @@ class ResearchRepo:
         ).fetchone()
         result_rows = self._conn.execute(
             """
-            SELECT topic,title,url,source,published_at,excerpt,fetched_at
+            SELECT topic,title,url,source,published_at,excerpt,fetched_at,match_reason
             FROM research_result WHERE listing_id=?
             ORDER BY published_at DESC,source,title
             """,
