@@ -55,66 +55,15 @@ def score_listing_for_profile(
 
 
 def passes_hard_filters(listing: Listing, profile: Profile) -> bool:
-    hard = profile.hard
-    if hard.rent is not None:
-        rent_value = _money_amount(listing)
-        if rent_value is None or rent_value > hard.rent.max:
-            return False
-        if hard.rent.min is not None and rent_value < hard.rent.min:
-            return False
+    from nostos.rank.criteria import classify_match_status
 
-    if hard.beds is not None:
-        beds_value = _observed_float(listing.beds)
-        if beds_value is None or not _matches_numeric_filter(
-            beds_value,
-            eq=hard.beds.eq,
-            minimum=hard.beds.min,
-            maximum=hard.beds.max,
-        ):
-            return False
-
-    if hard.baths is not None:
-        baths_value = _observed_float(listing.baths)
-        if baths_value is None or not _matches_numeric_filter(
-            baths_value,
-            eq=hard.baths.eq,
-            minimum=hard.baths.min,
-            maximum=hard.baths.max,
-        ):
-            return False
-
-    if hard.area is not None:
-        area_value = _observed_area(listing)
-        if area_value is None:
-            return False
-        if hard.area.unit.lower() != area_value.unit.lower():
-            return False
-        if area_value.value < hard.area.min:
-            return False
-
-    if hard.floor is not None:
-        # Unknown floor passes: the old rubric's "unknown -> include, mark
-        # unverified" rule. Only a stated floor outside the bound fails.
-        floor_value = _observed_float(listing.floor)
-        if floor_value is not None and not _matches_numeric_filter(
-            floor_value,
-            eq=hard.floor.eq,
-            minimum=hard.floor.min,
-            maximum=hard.floor.max,
-        ):
-            return False
-
-    if hard.areas:
-        area_key = listing_area_key(listing)
-        if area_key is not None and area_key not in set(hard.areas):
-            return False
-
-    excludes = {token.strip().lower() for token in hard.exclude}
-    if "basement" in excludes and _is_basement_listing(listing):
+    result = classify_match_status(listing, profile)
+    if result.status == "miss":
         return False
-    if "furnished_only" in excludes and _is_furnished(listing):
-        return False
-    return True
+    if result.status == "match" or profile.unknown_policy == "review":
+        return True
+    # Legacy profiles allowed unknown floor/area location; preserve that policy.
+    return all(reason in {"floor unstated", "area unknown"} for reason in result.reasons)
 
 
 def _matches_numeric_filter(

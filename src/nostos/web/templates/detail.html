@@ -71,6 +71,19 @@
           <span class="fact-v">{% if facts.available.present %}{{ facts.available.value }}{% else %}unstated{% endif %}</span>
         </div>
       </div>
+      {% if landmark %}
+        <section class="detail-landmark">
+          <strong>{{ landmark.name }}</strong>
+          {% if landmark.distance_km is not none %}
+            <span>{{ '%.1f'|format(landmark.distance_km) }} km straight-line from the source map pin</span>
+            <a href="/listings/{{ row.listing_id }}/walking-route">Calculate walking route</a>
+          {% else %}
+            <span>Exact source coordinates unavailable; verify the address.</span>
+          {% endif %}
+          <a href="{{ landmark.walking_url }}" target="_blank" rel="noopener">Walking directions</a>
+          <a href="{{ landmark.transit_url }}" target="_blank" rel="noopener">Transit directions</a>
+        </section>
+      {% endif %}
 
       {% if row.photos %}
         <div class="photo-grid">
@@ -85,27 +98,72 @@
 
     <aside class="detail-aside">
       <section class="actions-card">
+        <h2>Verify the unit</h2>
+        <p class="empty-small">Look for matching ads and supporting facts before deciding.</p>
+        <a class="btn btn-note" href="/listings/{{ row.listing_id }}/research">Research this unit</a>
+      </section>
+
+      <section class="actions-card">
+        <h2>Correct listing facts</h2>
+        {% if correction_error %}<p class="profile-banner profile-banner-err" role="alert">{{ correction_error }}</p>{% endif %}
+        {% if corrected %}<p class="profile-banner profile-banner-ok" role="status">Correction applied and ranking updated.</p>{% endif %}
+        <form method="post" action="/listings/{{ row.listing_id }}/correct" class="note-form">
+          <label for="correction_field">Fact to correct</label>
+          <select id="correction_field" name="field">
+            <option value="rent">Monthly rent</option>
+            <option value="beds">Bedrooms</option>
+            <option value="baths">Bathrooms</option>
+            <option value="area">Area</option>
+            <option value="floor">Floor</option>
+            <option value="parking_available">Parking available</option>
+            <option value="in_suite_laundry">In-suite laundry</option>
+            <option value="available_date">Available date</option>
+            <option value="lease_months">Lease length in months</option>
+            <option value="total_monthly">Total monthly cost</option>
+          </select>
+          <label for="correction_value">Correct value</label>
+          <input id="correction_value" name="value" required
+                 placeholder="Number, date, or yes/no">
+          <button type="submit" class="btn btn-note">Apply correction</button>
+        </form>
+        {% if corrections %}
+          <ul class="action-list" aria-label="Active corrections">
+            {% for correction in corrections %}
+              <li>
+                <span class="kind">{{ correction.field|replace('attributes.','')|replace('_',' ') }}</span>
+                <span>{{ correction.value }}</span>
+                <form method="post" action="/listings/{{ row.listing_id }}/corrections/reset">
+                  <input type="hidden" name="field" value="{{ correction.field }}">
+                  <button type="submit" class="btn btn-dismiss">Reset</button>
+                </form>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </section>
+
+      <section class="actions-card">
         <h2>Actions</h2>
         <div class="action-buttons">
           <button type="button"
                   class="btn btn-star {% if action_state.starred %}is-on{% endif %}"
                   data-action="star"
                   data-listing="{{ row.listing_id }}"
-                  {% if action_state.starred %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+                  aria-pressed="{{ 'true' if action_state.starred else 'false' }}">
             ★ {% if action_state.starred %}Shortlisted{% else %}Shortlist{% endif %}
           </button>
           <button type="button"
                   class="btn btn-dismiss {% if action_state.dismissed %}is-on{% endif %}"
                   data-action="dismiss"
                   data-listing="{{ row.listing_id }}"
-                  {% if action_state.dismissed %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+                  aria-pressed="{{ 'true' if action_state.dismissed else 'false' }}">
             ✕ {% if action_state.dismissed %}Dismissed{% else %}Dismiss{% endif %}
           </button>
           <button type="button"
                   class="btn btn-contact {% if action_state.contacted %}is-on{% endif %}"
                   data-action="contacted"
                   data-listing="{{ row.listing_id }}"
-                  {% if action_state.contacted %}disabled aria-pressed="true"{% else %}aria-pressed="false"{% endif %}>
+                  aria-pressed="{{ 'true' if action_state.contacted else 'false' }}">
             ✉ {% if action_state.contacted %}Contacted{% else %}Mark contacted{% endif %}
           </button>
           <button type="button"
@@ -163,6 +221,18 @@
           </div>
         {% endfor %}
       </div>
+      <form method="post" action="/listings/{{ row.listing_id }}/progress" class="note-form">
+        <label for="stage"><strong>Hunt progress</strong></label>
+        <select id="stage" name="stage">
+          {% for stage in ['spotted','shortlisted','contacted','replied','viewing_booked','viewed','applied','rejected','removed'] %}
+            <option value="{{ stage }}" {% if hunt_progress.stage == stage %}selected{% endif %}>{{ stage|replace('_',' ')|title }}</option>
+          {% endfor %}
+        </select>
+        <label for="viewing_at">Viewing date and time</label>
+        <input id="viewing_at" name="viewing_at" type="datetime-local">
+        <button type="submit" class="btn">Update progress</button>
+        {% if hunt_progress.viewing_at %}<a class="btn" href="/listings/{{ row.listing_id }}/viewing.ics">Add viewing to calendar</a>{% endif %}
+      </form>
     {% endif %}
 
     {% if rule_rows_fired or rule_rows_idle %}

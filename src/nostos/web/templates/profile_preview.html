@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Criteria preview · Nostos{% endblock %}
+{% block content %}
+<a class="back" href="/profile">← Edit criteria</a>
+<section class="profile-card pf-card">
+  <h1>Criteria impact preview</h1>
+  <p>This does not save or fetch listings. Return to the editor to apply the draft.</p>
+  <div class="facts-grid">
+    <div><strong>Before</strong><br>{{ preview.before.counts.match }} match · {{ preview.before.counts.unverified }} verify · {{ preview.before.counts.miss }} miss</div>
+    <div><strong>After</strong><br>{{ preview.after.counts.match }} match · {{ preview.after.counts.unverified }} verify · {{ preview.after.counts.miss }} miss</div>
+    <div><strong>Change</strong><br>{{ preview.entrants|length }} enter · {{ preview.exits|length }} exit</div>
+  </div>
+  <h2>Top results after the change</h2>
+  <ol>
+    {% for row in preview.after.rows[:10] %}
+      <li><strong>{{ '%.0f'|format(row.score) }}</strong> · {{ row.title }} · {{ row.status }}{% if row.reasons %} — {{ row.reasons|join('; ') }}{% endif %}</li>
+    {% else %}<li>No stored listings to preview yet.</li>{% endfor %}
+  </ol>
+  <form method="post" action="/profile/apply-preview">
+    <input type="hidden" name="expected_revision" value="{{ preview.revision }}">
+    <input type="hidden" name="proposed_json" value="{{ proposed_json|e }}">
+    <button type="submit" class="pf-btn pf-btn-primary">Apply this preview</button>
+  </form>
+</section>
+{% endblock %}

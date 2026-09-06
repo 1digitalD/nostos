@@ -52,6 +52,34 @@ nostos init \
   --force
 ```
 
+## Toronto search
+
+Toronto is packaged alongside Vancouver. Create a separate profile so your existing
+search stays available. These numbers are examples; choose your own criteria:
+
+```bash
+nostos init --non-interactive --city toronto --profile ~/.config/nostos/toronto.yaml \
+  --max-rent 3200 --beds 2 --laundry nice-to-have --source craigslist --source kijiji
+nostos watch --profile ~/.config/nostos/toronto.yaml --yes
+nostos web --profile ~/.config/nostos/toronto.yaml
+```
+
+Commands infer the citypack from the profile's city. Vancouver keeps its existing
+DB default; Toronto uses `toronto/nostos.db` beneath the data directory (or
+`NOSTOS_HOME`). Explicit `--citypack` and `--db` paths still override defaults.
+**Use a separate database for each city**: an explicitly shared DB is not partitioned
+by city, and stored records/watermarks would mix. No existing profile is overwritten
+unless `--force` is supplied.
+
+The first Toronto scope is the City of Toronto, not the entire GTA. Neighbourhood
+keywords and bounding boxes are approximate discovery labels, not verified boundaries
+or commute calculations. Unknown areas remain unknown. Both adapters passed a bounded
+live discovery/detail probe on 2026-09-04; this is not a guarantee of continuing
+coverage. Neither is marked load-bearing until sustained volume has been observed.
+The UI browses and edits criteria; fetching is started with `nostos watch` or the MCP
+watch tool. See [the implementation review](docs/11-implementation-review.md) for
+criteria limitations and the next iteration workflow.
+
 ## Safety and scraping posture
 
 - Respects `robots.txt` by default.
@@ -69,9 +97,32 @@ nostos web --port 9000              # different port
 nostos web --export ~/Desktop/listings.html   # write a self-contained HTML file
 ```
 
-The web UI binds to `127.0.0.1` only. There is no auth — it is a self-hosted single-user tool. To share a snapshot with someone on another machine, use `--export` and send the file. Action buttons (`Star` / `Dismiss` / `Contacted` / `Note`) write to a `listing_action` table so preferences persist across `nostos watch` runs.
+The web UI binds to `127.0.0.1` by default. There is no app-level auth, so remote
+access should use a trusted host control such as Tailscale Serve. To share a read-only
+snapshot, use `--export`. Listing actions and hunt stages persist across watch runs.
+Listing detail pages also support user corrections with reset, and a research workspace
+for matching stored ads and targeted searches on other rental sites.
 
-Hard filters and ranking weights are editable in the browser at `/profile`. Saving writes the profile YAML and immediately re-scores every stored listing from its latest source record — no network fetch — so the ranked list reflects the change on the next page load; listings that now fail a hard filter drop out of the list. The same re-score is available from the CLI with `nostos rank` after editing the YAML by hand.
+Hard filters and ranking weights are editable in the browser at `/profile`. Preview
+shows entrants, exits, and match counts before a guarded save. Saving writes the
+profile YAML and immediately re-scores stored listings from their latest records,
+without a network fetch. Listings that miss current criteria remain visible as saved
+research with the reason shown.
+
+The same revision-safe workflow is available to people and agents through the CLI,
+and the MCP tools wrap these commands:
+
+```bash
+nostos profile-get --profile ~/.config/nostos/toronto.yaml
+nostos profile-preview --profile ~/.config/nostos/toronto.yaml \
+  --patch-json '{"hard":{"rent":{"max":3400,"currency":"CAD"}}}'
+nostos profile-apply --profile ~/.config/nostos/toronto.yaml \
+  --patch-json '{"hard":{"rent":{"max":3400,"currency":"CAD"}}}' \
+  --expected-revision REVISION_FROM_PREVIEW
+nostos profile-history --profile ~/.config/nostos/toronto.yaml
+nostos profile-undo REVISION_ID --profile ~/.config/nostos/toronto.yaml \
+  --expected-revision CURRENT_REVISION
+```
 
 ## Development
 

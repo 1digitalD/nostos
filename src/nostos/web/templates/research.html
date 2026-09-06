@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Research {{ row.title or row.listing_id }} · Nostos{% endblock %}
+{% block content %}
+<a class="back" href="/listings/{{ row.listing_id }}">← Back to listing</a>
+
+<section class="detail-card">
+  <header class="detail-head">
+    <h1>Research this unit</h1>
+    <p class="detail-sub">{{ row.title or row.address or row.listing_id }}</p>
+    <p>Compare matching advertisements and verify missing facts. Apply confirmed information
+       with the correction controls on the listing page so the ranking updates immediately.</p>
+  </header>
+
+  <div class="detail-grid">
+    <div class="detail-main">
+      <section class="explain-card">
+        <h2>Possible matching advertisements</h2>
+        {% if related %}
+          <ul class="action-list">
+            {% for item in related %}
+              <li>
+                <a href="/listings/{{ item.listing_id }}"><strong>{{ item.title }}</strong></a>
+                <span class="source-tag source-{{ item.source }}">{{ item.source }}</span>
+                <span class="empty-small">Source listing ID: <code>{{ item.source_id }}</code></span>
+                <div class="empty-small">{{ item.evidence|join(' · ') }}</div>
+                <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">Open original ad</a>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="empty-small">No strong match is stored yet. Use the searches alongside
+             to check other rental sites.</p>
+        {% endif %}
+      </section>
+    </div>
+
+    <aside class="detail-aside">
+      <section class="actions-card">
+        <h2>Search other sources</h2>
+        <div class="action-buttons">
+          {% for label, url in research_links %}
+            <a class="btn" href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ label }}</a>
+          {% endfor %}
+        </div>
+      </section>
+      <section class="actions-card">
+        <h2>Useful facts to verify</h2>
+        <ul class="match-reasons">
+          <li>Exact street address and unit number</li>
+          <li>Parking and in-suite laundry</li>
+          <li>Total monthly fees and utilities</li>
+          <li>Available date and lease length</li>
+          <li>Floor plan, usable area, and room dimensions</li>
+        </ul>
+      </section>
+    </aside>
+  </div>
+</section>
+{% endblock %}

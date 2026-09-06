@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Annotated, Any
-from urllib.parse import urlencode
+from typing import Annotated, Any, cast
+from urllib.parse import quote_plus, urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import ValidationError
+from pydantic import BeforeValidator, ValidationError
 
 from nostos.config.profile import Profile, ScaledWeight
 from nostos.config.wizard import dump_profile_yaml
 from nostos.context import SearchContext, load_search_context
+from nostos.enrich.location import directions_url, distance_km, walking_route
 from nostos.rank import rules as rules_module
 from nostos.rank.rescore import RescoreReport, rescore_profile
 from nostos.rank.rules import DEFAULT_REGISTRY
@@ -25,9 +27,8 @@ from nostos.sources import (
     CraigslistSource,
     KijijiSource,
     Source,
-    enabled_sources,
-    resolve_source_registry,
 )
+from nostos.sources.manual import ManualSource
 from nostos.store.actions import ActionKind, ActionRepo
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ScoreRepo
@@ -44,6 +45,22 @@ from nostos.web.query import (
     rule_rows_from_breakdown,
     sort_label,
 )
+from nostos.workflows import (
+    CorrectionField,
+    ManualListing,
+    add_manual,
+    apply_profile,
+    clear_listing_correction,
+    correct_listing_fact,
+    listing_corrections,
+    preview_profile,
+    profile_history,
+    progress,
+    research_candidates,
+    revision,
+    update_progress,
+    viewing_ics,
+)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -52,6 +69,10 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # but unbounded length is a foot-gun (large DB rows, slow renders). The cap is
 # generous so legitimate notes still fit comfortably.
 _MAX_NOTE_LEN = 4000
+
+# Keep the initial DOM and response small enough to remain responsive over the
+# tailnet. The query fetches one extra row to decide whether to show Next.
+_LIST_PAGE_SIZE = 36
 
 # Acceptable sort keys. Anything else falls back to "score" rather than 422 —
 # invalid input is silently ignored so a stale bookmark or hand-crafted link
@@ -163,14 +184,9 @@ class AppState:
         sources = (
             CraigslistSource(),
             KijijiSource(),
+            ManualSource(),
         )
-        resolutions = resolve_source_registry(
-            context=context,
-            sources=sources,
-            credentials_present={source.name: True for source in sources},
-        )
-        active = enabled_sources(resolutions)
-        return context, {item.name: item for item in active}
+        return context, {item.name: item for item in sources}
 
     def reload(self) -> None:
         """Re-read the profile/citypack from disk so edits apply without a restart."""
@@ -208,6 +224,19 @@ def get_state(request: Request) -> AppState:
 StateDep = Annotated[AppState, Depends(get_state)]
 
 
+def _blank_filter_as_none(value: object) -> object:
+    """HTML GET forms submit unset number inputs as empty strings."""
+    return None if value == "" else value
+
+
+OptionalFilterNumber = Annotated[
+    float | None, Query(ge=0), BeforeValidator(_blank_filter_as_none)
+]
+OptionalScoreFilter = Annotated[
+    float | None, Query(ge=0, le=100), BeforeValidator(_blank_filter_as_none)
+]
+
+
 def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> FastAPI:
     """Build the FastAPI app bound to a specific db/profile/citypack triple."""
 
@@ -231,12 +260,12 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
     def index(
         request: Request,
         state: StateDep,
-        rent_min: float | None = Query(default=None, ge=0),
-        rent_max: float | None = Query(default=None, ge=0),
-        beds: float | None = Query(default=None, ge=0),
-        baths_min: float | None = Query(default=None, ge=0),
-        area_min: float | None = Query(default=None, ge=0),
-        score_min: float | None = Query(default=None, ge=0, le=100),
+        rent_min: OptionalFilterNumber = None,
+        rent_max: OptionalFilterNumber = None,
+        beds: OptionalFilterNumber = None,
+        baths_min: OptionalFilterNumber = None,
+        area_min: OptionalFilterNumber = None,
+        score_min: OptionalScoreFilter = None,
         source: str | None = Query(default=None),
         area_name: str | None = Query(default=None),
         sort: str = Query(default="score"),
@@ -244,6 +273,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
         starred: bool = Query(default=False),
         hide_dismissed: bool = Query(default=False),
         show_excluded: bool = Query(default=False),
+        page: int = Query(default=1, ge=1),
     ) -> HTMLResponse:
         normalized_sort = normalize_sort(sort if sort in _VALID_SORT_KEYS else None)
         filters = ListFilter(
@@ -269,7 +299,11 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 profile_id=state.profile_id,
                 sources=state.sources,
                 filters=filters,
+                limit=_LIST_PAGE_SIZE + 1,
+                offset=(page - 1) * _LIST_PAGE_SIZE,
             )
+            has_next = len(rows) > _LIST_PAGE_SIZE
+            rows = rows[:_LIST_PAGE_SIZE]
             row_actions = _row_action_states(
                 conn, listing_ids=tuple(row.listing_id for row in rows)
             )
@@ -301,6 +335,10 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "sort_label": sort_label(filters.sort),
                 "sources": known_sources(state.sources.values()),
                 "profile_id": state.profile_id,
+                "page": page,
+                "has_next": has_next,
+                "previous_url": _url_with(filters, page=page - 1) if page > 1 else None,
+                "next_url": _url_with(filters, page=page + 1) if has_next else None,
             },
         )
 
@@ -309,6 +347,8 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
         listing_id: str,
         request: Request,
         state: StateDep,
+        error: str | None = None,
+        corrected: bool = False,
     ) -> HTMLResponse:
         with state.connect() as conn:
             row = load_detail(
@@ -328,6 +368,17 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "excluded": action_repo.has_action(listing_id=listing_id, kind="excluded"),
                 "contacted": action_repo.has_action(listing_id=listing_id, kind="contacted"),
             }
+            hunt_progress = progress(conn, listing_id)
+            corrections = listing_corrections(conn, listing_id)
+            landmark = state.context.profile.landmark
+            landmark_context = None
+            if landmark is not None:
+                landmark_context = {
+                    "name": landmark.name,
+                    "distance_km": distance_km(row.listing, landmark),
+                    "walking_url": directions_url(row.address or "Toronto", landmark),
+                    "transit_url": directions_url(row.address or "Toronto", landmark, "transit"),
+                }
             breakdown = _score_breakdown(conn, listing_id=listing_id, profile_id=state.profile_id)
             breakdown_json = breakdown.get("breakdown_json") if breakdown else None
             breakdown_contributors = (
@@ -345,6 +396,11 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "listing_id": listing_id,
                 "actions": actions,
                 "action_state": action_state,
+                "hunt_progress": hunt_progress,
+                "corrections": corrections,
+                "correction_error": error,
+                "corrected": corrected,
+                "landmark": landmark_context,
                 "breakdown": breakdown,
                 "breakdown_contributors": breakdown_contributors,
                 "category_scores": row.category_scores,
@@ -390,6 +446,78 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 raise HTTPException(status_code=400, detail=msg)
             _record_action(state, listing_id, "note", note=cleaned)
         return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
+
+    @app.post("/listings/{listing_id}/correct")
+    def correct_fact_action(
+        listing_id: str,
+        state: StateDep,
+        field: Annotated[str, Form(...)],
+        value: Annotated[str, Form(...)],
+    ) -> RedirectResponse:
+        try:
+            with state.connect() as conn:
+                correct_listing_fact(
+                    conn,
+                    listing_id=listing_id,
+                    field=cast(CorrectionField, field),
+                    value=value,
+                    currency=state.context.citypack.locale.currency,
+                    area_unit=state.context.citypack.locale.area_unit,
+                )
+            state.rescore()
+        except ValueError as exc:
+            return RedirectResponse(
+                url=f"/listings/{listing_id}?" + urlencode({"error": str(exc)}),
+                status_code=303,
+            )
+        return RedirectResponse(
+            url=f"/listings/{listing_id}?corrected=1", status_code=303
+        )
+
+    @app.post("/listings/{listing_id}/corrections/reset")
+    def reset_fact_action(
+        listing_id: str,
+        state: StateDep,
+        field: Annotated[str, Form(...)],
+    ) -> RedirectResponse:
+        try:
+            with state.connect() as conn:
+                clear_listing_correction(conn, listing_id=listing_id, field=field)
+            state.rescore()
+        except ValueError as exc:
+            return RedirectResponse(
+                url=f"/listings/{listing_id}?" + urlencode({"error": str(exc)}),
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/listings/{listing_id}?corrected=1", status_code=303)
+
+    @app.get("/listings/{listing_id}/research", response_class=HTMLResponse)
+    def research_listing(listing_id: str, request: Request, state: StateDep) -> HTMLResponse:
+        with state.connect() as conn:
+            row = load_detail(
+                conn,
+                listing_id=listing_id,
+                context=state.context,
+                profile_id=state.profile_id,
+                sources=state.sources,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            related = research_candidates(conn, listing_id)
+        terms = " ".join(value for value in (row.address, row.title) if value).strip()
+        query = quote_plus(terms or listing_id)
+        sites = (
+            ("Search the open web", f"https://www.google.com/search?q={query}"),
+            ("Search Kijiji", f"https://www.google.com/search?q=site%3Akijiji.ca+{query}"),
+            ("Search Rentals.ca", f"https://www.google.com/search?q=site%3Arentals.ca+{query}"),
+            ("Search Realtor.ca", f"https://www.google.com/search?q=site%3Arealtor.ca+{query}"),
+        )
+        return state.templates.TemplateResponse(
+            request=request,
+            name="research.html",
+            context={"row": row, "listing_id": listing_id, "related": related,
+                     "research_links": sites, "profile_id": state.profile_id},
+        )
 
     @app.get("/profile", response_class=HTMLResponse)
     def profile_view(
@@ -441,17 +569,95 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 error=_describe_error(exc),
                 status_code=400,
             )
-        _save_profile_yaml(state.profile_path, new_profile)
-        state.reload()
+        expected = str(form_data.get("expected_revision") or revision(state.context.profile))
         params: dict[str, object] = {"saved": 1}
         try:
-            report = state.rescore()
+            with state.connect() as conn:
+                result = apply_profile(
+                    conn,
+                    path=state.profile_path,
+                    context=state.context,
+                    patch=new_profile.model_dump(mode="json"),
+                    expected_revision=expected,
+                    sources=state.sources,
+                    replace=True,
+                )
         except ValueError as exc:
-            params["error"] = f"Saved, but re-scoring failed: {_describe_error(exc)}"
+            return _render_profile_page(
+                request,
+                state,
+                submission=submission,
+                saved=False,
+                rescored=None,
+                skipped=None,
+                error=_describe_error(exc),
+                status_code=409,
+            )
         else:
-            params["rescored"] = report.scored_count
-            params["skipped"] = report.skipped
+            state.reload()
+            params["rescored"] = result["scored"]
+            params["skipped"] = result["skipped"]
         return RedirectResponse(url="/profile?" + urlencode(params), status_code=303)
+
+    @app.post("/profile/preview", response_class=HTMLResponse)
+    async def profile_preview(request: Request, state: StateDep) -> HTMLResponse:
+        form_data = await request.form()
+        submission = _submission_from_form(form_data)
+        try:
+            proposed = _apply_profile_form(state.context.profile, submission, state.context)
+            with state.connect() as conn:
+                preview = preview_profile(
+                    conn,
+                    context=state.context,
+                    proposed=proposed,
+                    sources=state.sources,
+                )
+        except (ValueError, KeyError, TypeError) as exc:
+            return _render_profile_page(
+                request,
+                state,
+                submission=submission,
+                saved=False,
+                rescored=None,
+                skipped=None,
+                error=_describe_error(exc),
+                status_code=400,
+            )
+        return state.templates.TemplateResponse(
+            request=request,
+            name="profile_preview.html",
+            context={
+                "preview": preview,
+                "profile_id": state.profile_id,
+                "proposed_json": proposed.model_dump_json(),
+            },
+        )
+
+    @app.post("/profile/apply-preview")
+    async def profile_apply_preview(request: Request, state: StateDep) -> RedirectResponse:
+        form = await request.form()
+        proposed = Profile.model_validate_json(str(form.get("proposed_json") or ""))
+        expected = str(form.get("expected_revision") or "")
+        try:
+            with state.connect() as conn:
+                result = apply_profile(
+                    conn,
+                    path=state.profile_path,
+                    context=state.context,
+                    patch=proposed.model_dump(mode="json"),
+                    expected_revision=expected,
+                    sources=state.sources,
+                    replace=True,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=_describe_error(exc)) from exc
+        state.reload()
+        return RedirectResponse(
+            url="/profile?" + urlencode(
+                {"saved": 1, "rescored": result["scored"], "skipped": result["skipped"]}
+            ),
+            status_code=303,
+        )
 
     @app.post("/profile/rescore")
     def profile_rescore(state: StateDep) -> RedirectResponse:
@@ -466,6 +672,106 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             params["rescored"] = report.scored_count
             params["skipped"] = report.skipped
         return RedirectResponse(url="/profile?" + urlencode(params), status_code=303)
+
+    @app.post("/profile/undo")
+    def profile_undo(state: StateDep) -> RedirectResponse:
+        with state.connect() as conn:
+            history = profile_history(conn, state.profile_path)
+            target = next(
+                (item for item in history if item["revision"] != revision(state.context.profile)),
+                None,
+            )
+            if target is None:
+                return RedirectResponse(
+                    url="/profile?error=No+earlier+criteria+revision",
+                    status_code=303,
+                )
+            result = apply_profile(
+                conn,
+                path=state.profile_path,
+                context=state.context,
+                patch=Profile.model_validate_json(target["payload"]).model_dump(mode="json"),
+                expected_revision=revision(state.context.profile),
+                sources=state.sources,
+                replace=True,
+            )
+        state.reload()
+        return RedirectResponse(
+            url="/profile?" + urlencode({"saved": 1, "rescored": result["scored"]}),
+            status_code=303,
+        )
+
+    @app.post("/manual")
+    async def manual_add(request: Request, state: StateDep) -> RedirectResponse:
+        form = await request.form()
+        payload = {key: value for key, value in form.items() if isinstance(value, str)}
+        for key in ("rent", "beds", "baths", "area", "floor", "lease_months", "total_monthly"):
+            if not payload.get(key):
+                payload.pop(key, None)
+        listing = ManualListing.model_validate(payload)
+        with state.connect() as conn:
+            listing_id = add_manual(conn, listing)
+        state.rescore()
+        return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
+
+    @app.post("/listings/{listing_id}/progress")
+    async def progress_update(
+        listing_id: str, request: Request, state: StateDep
+    ) -> RedirectResponse:
+        form = await request.form()
+        with state.connect() as conn:
+            update_progress(
+                conn,
+                listing_id,
+                str(form.get("stage") or "spotted"),  # type: ignore[arg-type]
+                str(form.get("viewing_at") or ""),
+                state.context.citypack.locale.timezone,
+            )
+        return RedirectResponse(url=f"/listings/{listing_id}", status_code=303)
+
+    @app.get("/listings/{listing_id}/viewing.ics")
+    def calendar_export(listing_id: str, state: StateDep) -> Response:
+        with state.connect() as conn:
+            row = load_detail(
+                conn,
+                listing_id=listing_id,
+                context=state.context,
+                profile_id=state.profile_id,
+                sources=state.sources,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            body = viewing_ics(conn, listing_id, row.title, row.address or "")
+        return Response(
+            body,
+            media_type="text/calendar",
+            headers={"Content-Disposition": 'attachment; filename="nostos-viewing.ics"'},
+        )
+
+    @app.get("/listings/{listing_id}/walking-route", response_class=HTMLResponse)
+    def landmark_route(listing_id: str, state: StateDep) -> HTMLResponse:
+        landmark = state.context.profile.landmark
+        if landmark is None:
+            raise HTTPException(status_code=404, detail="No landmark configured")
+        with state.connect() as conn:
+            row = load_detail(
+                conn,
+                listing_id=listing_id,
+                context=state.context,
+                profile_id=state.profile_id,
+                sources=state.sources,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            try:
+                route = walking_route(conn, row.listing, landmark)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return HTMLResponse(
+            f"<h1>{route['minutes']} min walk · {route['km']} km</h1>"
+            f"<p>{route['source']}. {route['note']}</p>"
+            f"<p><a href='/listings/{listing_id}'>Back to listing</a></p>"
+        )
 
     @app.get("/listings/{listing_id}/explain.json", response_class=JSONResponse)
     def explain_json(listing_id: str, state: StateDep) -> JSONResponse:
@@ -486,7 +792,12 @@ def _record_action(
     note: str | None = None,
 ) -> None:
     with state.connect() as conn:
-        ActionRepo(conn).record_action(listing_id=listing_id, kind=kind, note=note)
+        repo = ActionRepo(conn)
+        if kind == "note":
+            repo.record_action(listing_id=listing_id, kind=kind, note=note)
+        else:
+            repo.toggle_flag(listing_id=listing_id, kind=kind)
+        conn.commit()
 
 
 def _active_filters(filters: ListFilter) -> dict[str, object]:
@@ -801,15 +1112,25 @@ def _contributors_by_listing(
 ) -> dict[str, list[dict[str, float | str]]]:
     """Pre-compute top-n contributors for many listings in one pass."""
 
+    if not listing_ids:
+        return {}
+    placeholders = ",".join("?" for _ in listing_ids)
+    rows = conn.execute(
+        f"""
+        SELECT listing_id, breakdown_json FROM score
+        WHERE profile_id = ? AND listing_id IN ({placeholders})
+        """,
+        (profile_id, *listing_ids),
+    ).fetchall()
     result: dict[str, list[dict[str, float | str]]] = {}
-    for listing_id in listing_ids:
-        bd = _score_breakdown(conn, listing_id=listing_id, profile_id=profile_id)
-        if bd is None:
+    for row in rows:
+        try:
+            breakdown = json.loads(str(row["breakdown_json"]))
+        except (TypeError, ValueError):
             continue
-        breakdown = bd.get("breakdown_json")
         contributors = _top_contributors(breakdown, n=n)
         if contributors:
-            result[str(listing_id)] = contributors
+            result[str(row["listing_id"])] = contributors
     return result
 
 
@@ -915,6 +1236,14 @@ def _submission_from_profile(profile: Profile) -> ProfileSubmission:
         put("floor_max", hard.floor.max)
     if hard.area is not None:
         put("area_min", hard.area.min)
+    if hard.available_by is not None:
+        fields["available_by"] = hard.available_by.isoformat()
+    put("lease_months_min", hard.lease_months_min)
+    put("total_monthly_max", hard.total_monthly_max)
+    if hard.require_laundry:
+        fields["require_laundry"] = "on"
+    if hard.require_parking:
+        fields["require_parking"] = "on"
     excludes = {token.strip().lower() for token in hard.exclude}
     for token, _label, field_name in _EXCLUDE_TOKENS:
         if token in excludes:
@@ -1026,6 +1355,8 @@ def _render_profile_page(
     profile = context.profile
     citypack = context.citypack
     source_keys = sorted(set(citypack.sources.keys()) | set(profile.sources.keys()))
+    with state.connect() as conn:
+        history = profile_history(conn, state.profile_path)
     return state.templates.TemplateResponse(
         request=request,
         name="profile.html",
@@ -1049,6 +1380,8 @@ def _render_profile_page(
             "skipped": skipped,
             "error": error,
             "profile_id": state.profile_id,
+            "profile_revision": revision(profile),
+            "has_history": any(item["revision"] != revision(profile) for item in history),
         },
     )
 
@@ -1126,6 +1459,23 @@ def _apply_profile_form(
             else citypack.locale.area_unit
         )
         hard["area"] = {"min": area_min, "unit": unit}
+
+    available_by = submission.get("available_by").strip()
+    if available_by:
+        try:
+            hard["available_by"] = date.fromisoformat(available_by).isoformat()
+        except ValueError:
+            raise ValueError("Available by must be a valid date.") from None
+    else:
+        hard["available_by"] = None
+    hard["lease_months_min"] = _coerce_float(
+        submission.get("lease_months_min"), field_name="Minimum lease", minimum=0
+    )
+    hard["total_monthly_max"] = _coerce_float(
+        submission.get("total_monthly_max"), field_name="Total monthly cost max", minimum=0
+    )
+    hard["require_laundry"] = submission.checked("require_laundry")
+    hard["require_parking"] = submission.checked("require_parking")
 
     known_area_keys = {area.key for area in citypack.areas}
     unknown_areas = sorted(set(submission.areas) - known_area_keys)

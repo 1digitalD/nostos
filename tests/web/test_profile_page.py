@@ -140,6 +140,11 @@ def _valid_form() -> dict[str, str | list[str]]:
         "baths_max": "2",
         "floor_max": "12",
         "area_min": "700",
+        "available_by": "2026-10-01",
+        "lease_months_min": "12",
+        "total_monthly_max": "2700",
+        "require_laundry": "on",
+        "require_parking": "on",
         "areas": ["kits"],
         "exclude_basement": "on",
         "exclude_furnished_only": "on",
@@ -184,6 +189,8 @@ def test_get_profile_renders_every_rule_and_area(tmp_path: Path) -> None:
     for name in (
         "rent_max", "rent_min", "beds_eq", "beds_min", "beds_max",
         "baths_min", "baths_max", "floor_max", "area_min",
+        "available_by", "lease_months_min", "total_monthly_max",
+        "require_laundry", "require_parking",
         "exclude_basement", "exclude_furnished_only", "unverified_penalty",
     ):
         assert f'name="{name}"' in body
@@ -199,7 +206,8 @@ def test_get_profile_renders_every_rule_and_area(tmp_path: Path) -> None:
     assert 'name="src_kijiji"' in body
 
     # Action bar + helper copy.
-    assert 'action="/profile/rescore"' in body
+    assert 'formaction="/profile/preview"' in body
+    assert "Save and update rankings" in body
     assert "Hard filters remove listings" in body
     assert "Unsaved changes" in body
 
@@ -241,6 +249,12 @@ def test_post_profile_saves_reloads_rescores_and_redirects(tmp_path: Path) -> No
     assert saved.hard.area is not None
     assert saved.hard.area.min == 700
     assert saved.hard.area.unit == "sqft"
+    assert saved.hard.available_by is not None
+    assert saved.hard.available_by.isoformat() == "2026-10-01"
+    assert saved.hard.lease_months_min == 12
+    assert saved.hard.total_monthly_max == 2700
+    assert saved.hard.require_laundry is True
+    assert saved.hard.require_parking is True
     assert saved.hard.areas == ["kits"]
     assert saved.hard.exclude == ["basement", "furnished_only"]
     assert saved.weights["laundry.in_suite"] == 12
@@ -261,10 +275,11 @@ def test_post_profile_saves_reloads_rescores_and_redirects(tmp_path: Path) -> No
     assert "pets.allowed" not in text
     assert not (tmp_path / "profile.yaml.tmp").exists()
 
-    # In-memory state was reloaded and the score table recomputed: the listing
-    # is gone from the index without a restart.
+    # In-memory state was reloaded and the score table recomputed. The listing
+    # remains available as saved research and is visibly classified as a miss.
     body = client.get("/").text
-    assert "Sunny 2BR in Kitsilano" not in body
+    assert "Sunny 2BR in Kitsilano" in body
+    assert "Miss" in body
     assert _score_ids(db_path, profile_id) == set()
 
     # Following the redirect renders the banner with the counts and the new values.
@@ -285,7 +300,8 @@ def test_post_rescore_regenerates_score_rows(tmp_path: Path) -> None:
     with connect(db_path) as conn, conn:
         conn.execute("DELETE FROM score WHERE profile_id = ?", (profile_id,))
     assert _score_ids(db_path, profile_id) == set()
-    assert "Sunny 2BR in Kitsilano" not in client.get("/").text
+    # Saved research remains browseable even before a score is regenerated.
+    assert "Sunny 2BR in Kitsilano" in client.get("/").text
 
     resp = client.post("/profile/rescore", follow_redirects=False)
     assert resp.status_code == 303
@@ -344,6 +360,12 @@ def test_negative_and_malformed_numbers_are_rejected(tmp_path: Path) -> None:
     assert "Area min must be a number" in resp.text
 
     form = _valid_form()
+    form["available_by"] = "not-a-date"
+    resp = client.post("/profile", data=form, follow_redirects=False)
+    assert resp.status_code == 400
+    assert "Available by must be a valid date" in resp.text
+
+    form = _valid_form()
     form["areas"] = ["nowhere"]
     resp = client.post("/profile", data=form, follow_redirects=False)
     assert resp.status_code == 400
@@ -365,6 +387,11 @@ def test_blank_form_clears_optional_filters(tmp_path: Path) -> None:
     assert saved.hard.beds is None
     assert saved.hard.areas == []
     assert saved.hard.exclude == []
+    assert saved.hard.available_by is None
+    assert saved.hard.lease_months_min is None
+    assert saved.hard.total_monthly_max is None
+    assert saved.hard.require_laundry is False
+    assert saved.hard.require_parking is False
     assert saved.weights == {}
     assert saved.area_key_weights == {}
     assert saved.confidence.unverified_penalty == 0

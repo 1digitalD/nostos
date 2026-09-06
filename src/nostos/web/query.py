@@ -17,15 +17,13 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import nostos.rank.rules as _rules
-from nostos.config.profile import Profile
 from nostos.context import SearchContext
+from nostos.corrections import apply_user_corrections, load_user_corrections
 from nostos.enrich.chain import run_enricher_chain
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import Area, Listing, Money, Observed, Photo, SourceRecord
 from nostos.model.source_record import JSONValue
 from nostos.rank.profile_scoring import (
-    _is_basement_listing,
-    _is_furnished,
     listing_area_key,
     rent_display,
 )
@@ -84,14 +82,6 @@ STATUS_FILTER_VALUES: frozenset[str] = frozenset({"match", "unverified", "miss"}
 
 
 _WEB_ENRICHERS = (TextRuleEnricher(),)
-
-@dataclass(frozen=True, slots=True)
-class MatchStatus:
-    """Outcome of comparing a listing against the profile's hard filters."""
-
-    status: MatchStatusKind
-    reasons: tuple[str, ...] = ()
-
 
 @dataclass(frozen=True, slots=True)
 class ListFilter:
@@ -214,6 +204,7 @@ def query_list(
     sources: Mapping[str, Source],
     filters: ListFilter,
     limit: int | None = None,
+    offset: int = 0,
 ) -> list[ListRow]:
     """Return scored listings joined with the latest source record, after filter.
 
@@ -225,21 +216,34 @@ def query_list(
 
     rows = conn.execute(
         """
-        SELECT listing_id, score
-        FROM score
-        WHERE profile_id = ?
-        ORDER BY score DESC, listing_id ASC
+        SELECT l.id AS listing_id, COALESCE(s.score, 0) AS score
+        FROM listing l LEFT JOIN score s ON s.listing_id=l.id AND s.profile_id=?
+        ORDER BY score DESC, l.id ASC
         """,
         (profile_id,),
     ).fetchall()
 
-    listing_ids = tuple(str(item["listing_id"]) for item in rows)
+    all_listing_ids = tuple(str(item["listing_id"]) for item in rows)
     score_by_id = {str(item["listing_id"]): float(item["score"]) for item in rows}
+    excluded_ids = _action_listing_ids(conn, kind="excluded", listing_ids=all_listing_ids)
+
+    # The normal landing page is already ordered by score in SQL. Select its
+    # page before replaying source records and running text enrichment, which
+    # otherwise scales with the full database even though only one page is
+    # rendered. Filtered and alternate-sort views retain the complete path.
+    pre_paginated = limit is not None and _supports_early_pagination(filters)
+    if pre_paginated:
+        assert limit is not None
+        visible_ids = [item for item in all_listing_ids if item not in excluded_ids]
+        listing_ids = tuple(visible_ids[offset : offset + limit])
+    else:
+        listing_ids = all_listing_ids
+
     latest_records = _latest_source_records_by_listing_ids(conn, listing_ids=listing_ids)
-    excluded_ids = _action_listing_ids(conn, kind="excluded", listing_ids=listing_ids)
     starred_ids = _action_listing_ids(conn, kind="star", listing_ids=listing_ids)
     dismissed_ids = _action_listing_ids(conn, kind="dismiss", listing_ids=listing_ids)
     breakdowns_by_id = _breakdowns_by_listing(conn, listing_ids=listing_ids, profile_id=profile_id)
+    corrections_by_id = load_user_corrections(conn, listing_ids=listing_ids)
     area_labels = dict(known_areas(context))
 
     prepared: list[ListRow] = []
@@ -252,7 +256,14 @@ def query_list(
         source_obj = sources.get(record_row.source)
         if source_obj is None:
             continue
-        listing = _listing_from_record(source_obj, record_row.record, listing_id, context)
+        listing = _listing_from_record(
+            conn,
+            source_obj,
+            record_row.record,
+            listing_id,
+            context,
+            correction_rows=corrections_by_id.get(listing_id, ()),
+        )
         row = _build_list_row(
             listing_id=listing_id,
             listing=listing,
@@ -268,14 +279,27 @@ def query_list(
         if _passes_filter(row, filters):
             prepared.append(row)
 
-    return _apply_sort(prepared, filters.sort, limit=limit)
+    return _apply_sort(
+        prepared,
+        filters.sort,
+        limit=None if pre_paginated else limit,
+        offset=0 if pre_paginated else offset,
+    )
+
+
+def _supports_early_pagination(filters: ListFilter) -> bool:
+    """Return whether SQL score order can be paginated before reconstruction."""
+
+    return filters == ListFilter()
 
 
 def _listing_from_record(
+    conn: sqlite3.Connection,
     source_obj: Source,
     record: SourceRecord,
     listing_id: str,
     context: SearchContext,
+    correction_rows: Iterable[Mapping[str, object]] | None = None,
 ) -> Listing:
     listing = source_obj.to_listing(record, context)
     # Re-key to the canonical listing_id (post cross-source dedupe).
@@ -283,6 +307,12 @@ def _listing_from_record(
         listing = listing.model_copy(
             update={"identity": listing.identity.model_copy(update={"listing_id": listing_id})}
         )
+    listing = apply_user_corrections(
+        conn,
+        listing_id=listing_id,
+        listing=listing,
+        rows=correction_rows,
+    )
     # Run the same text enrichment the scorer runs so the facts row (floor,
     # parking, laundry...) and the match status agree with the stored score.
     return run_enricher_chain(listing, _WEB_ENRICHERS, context)
@@ -514,130 +544,7 @@ def _field_int(field: object) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def _fmt_money(value: float) -> str:
-    return f"${value:,.0f}"
-
-
-def _fmt_num(value: float) -> str:
-    return f"{value:g}"
-
-
-def _check_numeric(
-    *,
-    name: str,
-    value: float | None,
-    eq: float | None,
-    minimum: float | None,
-    maximum: float | None,
-    unstated_is_miss: bool,
-    misses: list[str],
-    unknowns: list[str],
-) -> None:
-    """Append a reason to ``misses`` or ``unknowns`` for one numeric hard filter."""
-
-    if value is None:
-        (misses if unstated_is_miss else unknowns).append(f"{name} unstated")
-        return
-    if eq is not None and value != eq:
-        misses.append(f"{name} {_fmt_num(value)} ≠ {_fmt_num(eq)}")
-        return
-    if minimum is not None and value < minimum:
-        misses.append(f"{name} {_fmt_num(value)} < min {_fmt_num(minimum)}")
-    if maximum is not None and value > maximum:
-        misses.append(f"{name} {_fmt_num(value)} > max {_fmt_num(maximum)}")
-
-
-def classify_match_status(listing: Listing, profile: Profile) -> MatchStatus:
-    """Compare the listing against every hard filter and explain the verdict.
-
-    - ``miss``       — at least one stated criterion fails (reasons list each)
-    - ``unverified`` — nothing fails, but a criterion-relevant field is
-                       unstated (reasons list what is missing)
-    - ``match``      — every criterion passes with the data available
-
-    ``miss`` wins over ``unverified``; the reasons tuple carries the misses
-    first, then the unknowns, so the tooltip leads with the decisive facts.
-    """
-
-    hard = profile.hard
-    misses: list[str] = []
-    unknowns: list[str] = []
-
-    if hard.rent is not None:
-        rent_value = _rent_amount(listing)
-        if rent_value is None:
-            unknowns.append("rent unstated")
-        else:
-            if rent_value > hard.rent.max:
-                misses.append(f"rent {_fmt_money(rent_value)} > max {_fmt_money(hard.rent.max)}")
-            if hard.rent.min is not None and rent_value < hard.rent.min:
-                misses.append(f"rent {_fmt_money(rent_value)} < min {_fmt_money(hard.rent.min)}")
-
-    if hard.beds is not None:
-        _check_numeric(
-            name="beds",
-            value=_observed_scalar(listing.beds),
-            eq=hard.beds.eq,
-            minimum=hard.beds.min,
-            maximum=hard.beds.max,
-            unstated_is_miss=False,
-            misses=misses,
-            unknowns=unknowns,
-        )
-
-    if hard.baths is not None:
-        _check_numeric(
-            name="baths",
-            value=_observed_scalar(listing.baths),
-            eq=hard.baths.eq,
-            minimum=hard.baths.min,
-            maximum=hard.baths.max,
-            unstated_is_miss=False,
-            misses=misses,
-            unknowns=unknowns,
-        )
-
-    if hard.area is not None:
-        area_value, area_unit = _area_values(listing)
-        if area_value is None:
-            unknowns.append("area unstated")
-        elif area_unit is not None and area_unit.lower() != hard.area.unit.lower():
-            unknowns.append(f"area in {area_unit}, profile uses {hard.area.unit}")
-        elif area_value < hard.area.min:
-            misses.append(
-                f"area {area_value:,.0f} < min {hard.area.min:,.0f} {hard.area.unit}"
-            )
-
-    if hard.floor is not None:
-        _check_numeric(
-            name="floor",
-            value=_observed_scalar(listing.floor),
-            eq=hard.floor.eq,
-            minimum=hard.floor.min,
-            maximum=hard.floor.max,
-            unstated_is_miss=False,
-            misses=misses,
-            unknowns=unknowns,
-        )
-
-    if hard.areas:
-        area_key = listing_area_key(listing)
-        if area_key is None:
-            unknowns.append("area unknown")
-        elif area_key not in set(hard.areas):
-            misses.append("area not in allowed list")
-
-    excludes = {token.strip().lower() for token in hard.exclude}
-    if "basement" in excludes and _is_basement_listing(listing):
-        misses.append("basement unit")
-    if "furnished_only" in excludes and _is_furnished(listing):
-        misses.append("furnished only")
-
-    if misses:
-        return MatchStatus(status="miss", reasons=tuple(misses + unknowns))
-    if unknowns:
-        return MatchStatus(status="unverified", reasons=tuple(unknowns))
-    return MatchStatus(status="match", reasons=())
+from nostos.rank.criteria import MatchStatus, classify_match_status  # noqa: E402
 
 
 def _classify_match_status(listing: Listing, context: SearchContext) -> str:
@@ -905,12 +812,14 @@ _SORT_KEYS = {
 }
 
 
-def _apply_sort(rows: list[ListRow], sort: str, *, limit: int | None) -> list[ListRow]:
+def _apply_sort(
+    rows: list[ListRow], sort: str, *, limit: int | None, offset: int = 0
+) -> list[ListRow]:
     key = _SORT_KEYS[normalize_sort(sort)]
     ordered = sorted(rows, key=key)
     if limit is not None:
-        return ordered[:limit]
-    return ordered
+        return ordered[offset : offset + limit]
+    return ordered[offset:]
 
 
 def load_detail(
@@ -930,7 +839,7 @@ def load_detail(
     source_obj = sources.get(record_row.source)
     if source_obj is None:
         return None
-    listing = _listing_from_record(source_obj, record_row.record, listing_id, context)
+    listing = _listing_from_record(conn, source_obj, record_row.record, listing_id, context)
 
     score_row = conn.execute(
         """
@@ -999,3 +908,9 @@ def _ensure_aware(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+__all__ = [
+    "MatchStatus",
+    "classify_match_status",
+]

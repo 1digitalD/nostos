@@ -28,6 +28,11 @@ from nostos.sources.base import Capabilities, Liveness
         (["rank", "--help"],),
         (["list", "--help"],),
         (["explain", "--help"],),
+        (["profile-get", "--help"],),
+        (["profile-preview", "--help"],),
+        (["profile-apply", "--help"],),
+        (["profile-history", "--help"],),
+        (["profile-undo", "--help"],),
         (["web", "--help"],),
     ],
 )
@@ -1071,7 +1076,7 @@ def test_wizard_written_profiles_flip_order_for_laundry_preference(
     assert no_laundry_list.exit_code == 0, no_laundry_list.output
     no_laundry_order = _parse_listing_ids(no_laundry_list.stdout)
 
-    assert laundry_order[:2] == ["stub:with-laundry", "stub:no-laundry"]
+    assert laundry_order == ["stub:with-laundry"]
     assert no_laundry_order[:2] == ["stub:no-laundry", "stub:with-laundry"]
 
 

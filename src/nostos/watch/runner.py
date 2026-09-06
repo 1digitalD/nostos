@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel
 
@@ -70,7 +72,6 @@ class _SourceSnapshot:
     prefiltered_records: int
     candidate_watermark: str | None
     error: str | None
-
     @property
     def count(self) -> int:
         # "Currently tracked", not "new this run": listings persisted this run, plus
@@ -79,6 +80,10 @@ class _SourceSnapshot:
         # all (still live, just not new — see CraigslistSource.prefiltered_record_count).
         # A source genuinely returning nothing keeps all three at zero.
         return len(self.listings) + self.skipped_records + self.prefiltered_records
+
+
+_UnitFingerprint = tuple[str, str, float, float, float, float, float]
+_UnitClaim = tuple[str, str]
 
 
 def run_watch(
@@ -104,7 +109,11 @@ def run_watch(
     source_metadata = _source_metadata(context=context, sources=source_list)
     source_names = tuple(source.name for source in source_list)
     history = load_source_histories(conn, source_names=source_names)
-    seen_source_ids = _load_seen_source_ids(conn=conn, source_names=source_names)
+    seen_source_ids = _load_seen_source_ids(
+        conn=conn,
+        source_names=source_names,
+        refresh_before=started_at - timedelta(hours=24),
+    )
     context_with_scan_state = replace(
         context,
         source_scan_state={
@@ -334,7 +343,7 @@ def _canonicalize_listings(
     conn: sqlite3.Connection,
     listings: tuple[_PersistableListing, ...],
 ) -> tuple[_PersistableListing, ...]:
-    """Resolve one canonical listing_id per cross-source signature.
+    """Resolve one canonical listing_id per physical rental unit.
 
     ``listing_source.signature`` exists precisely so one physical unit posted on
     several sites collapses to one ``listing`` row (docs/03-data-model.md:128-129).
@@ -345,7 +354,7 @@ def _canonicalize_listings(
     its own ``listing_source`` row and its own observations (with their own origin)
     once persisted — only the row they land under is shared.
 
-    Merging is deliberately restricted to *different* sources sharing a signature.
+    Signature-only merging is deliberately restricted to different sources.
     The signature is address tokens plus a coarse price bucket (25-unit rounding);
     two distinct units in the same building at the same rent (#305 and #410, both
     $2950) hash identically. Within one source, ``source+source_id`` is already a
@@ -353,7 +362,10 @@ def _canonicalize_listings(
     that coincidence than a genuine repost — merging on it would silently fold
     two different apartments into one listing. Restricting merges to cross-source
     matches keeps the common case (the same unit cross-posted to two sites)
-    working while leaving that same-source collision unmerged. It does not
+    working while leaving that same-source collision unmerged. Same-source reposts
+    merge only when their exact photo URL, rent, bed/bath facts, and coordinates
+    match. That stronger evidence avoids treating every unit in one building and
+    price bucket as identical. It does not
     eliminate the risk for two *different* sources that happen to describe two
     different units at an identical address/price bucket — see the PR
     description for that residual exposure.
@@ -363,6 +375,7 @@ def _canonicalize_listings(
 
     signatures = tuple({item.listing.identity.signature for item in listings})
     claims = _existing_canonical_by_signature(conn=conn, signatures=signatures)
+    strong_claims = _existing_canonical_by_unit_fingerprint(conn)
 
     canonicalized: list[_PersistableListing] = []
     for item in listings:
@@ -370,11 +383,22 @@ def _canonicalize_listings(
         signature = identity.signature
         own_id = identity.listing_id
         own_source = identity.source
+        fingerprints = _unit_fingerprints(own_source, item.record.payload)
 
+        posted = _posted_value(item.record.payload)
+        strong_ids = {
+            unit_claim[0]
+            for value in fingerprints
+            if (unit_claim := strong_claims.get(value)) is not None
+            and posted
+            and unit_claim[1]
+            and posted != unit_claim[1]
+        }
         claim = claims.get(signature)
-        if claim is not None and own_source not in claim[1]:
+        if len(strong_ids) == 1:
+            canonical_id = next(iter(strong_ids))
+        elif claim is not None and own_source not in claim[1]:
             canonical_id = claim[0]
-            claim[1].add(own_source)
         else:
             canonical_id = own_id
             if claim is None:
@@ -383,6 +407,11 @@ def _canonicalize_listings(
             # run, or an earlier item in this same run) — keep this item under
             # its own id rather than risk merging two different units from the
             # same source that happen to share a signature.
+
+        for value in fingerprints:
+            strong_claims.setdefault(value, (canonical_id, posted))
+        if claim is not None and canonical_id == claim[0]:
+            claim[1].add(own_source)
 
         if canonical_id == own_id:
             canonicalized.append(item)
@@ -393,6 +422,83 @@ def _canonicalize_listings(
         canonicalized.append(replace(item, listing=remapped_listing))
 
     return tuple(canonicalized)
+
+
+def _unit_fingerprints(source: str, payload: JSONValue) -> set[_UnitFingerprint]:
+    """Return conservative same-source repost keys from exact unit evidence."""
+    if not isinstance(payload, Mapping):
+        return set()
+    point = payload.get("point")
+    if not isinstance(point, Mapping):
+        return set()
+    price = payload.get("price", payload.get("rent"))
+    if price is None:
+        return set()
+    try:
+        facts = (
+            float(price),
+            float(payload["beds"]),
+            float(payload["baths"]),
+            round(float(point["lat"]), 4),
+            round(float(point["lng"]), 4),
+        )
+    except (KeyError, TypeError, ValueError):
+        return set()
+
+    # Use the discovery-card thumbnail only. Detail-page galleries can contain
+    # shared building stock images, and fixture replays often reuse one detail
+    # page for many otherwise distinct search results.
+    raw_photo = payload.get("photo")
+    raw_photos: list[object] = [raw_photo] if isinstance(raw_photo, str) else []
+
+    fingerprints: set[_UnitFingerprint] = set()
+    for raw in raw_photos:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        parsed = urlsplit(raw.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        photo = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", ""))
+        fingerprints.add((source, photo, *facts))
+    return fingerprints
+
+
+def _existing_canonical_by_unit_fingerprint(
+    conn: sqlite3.Connection,
+) -> dict[_UnitFingerprint, _UnitClaim]:
+    rows = conn.execute(
+        """
+        WITH latest AS (
+            SELECT sr.listing_id, sr.source, sr.source_id, sr.payload,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY sr.listing_id, sr.source, sr.source_id
+                       ORDER BY sr.id DESC
+                   ) AS row_number
+            FROM source_record sr
+        )
+        SELECT latest.listing_id, latest.source, latest.payload
+        FROM latest
+        JOIN listing ON listing.id = latest.listing_id
+        WHERE latest.row_number = 1
+        ORDER BY listing.first_seen ASC, latest.listing_id ASC
+        """
+    ).fetchall()
+    claims: dict[_UnitFingerprint, _UnitClaim] = {}
+    for row in rows:
+        try:
+            payload = cast(JSONValue, json.loads(str(row["payload"])))
+        except (TypeError, ValueError):
+            continue
+        for value in _unit_fingerprints(str(row["source"]), payload):
+            claims.setdefault(value, (str(row["listing_id"]), _posted_value(payload)))
+    return claims
+
+
+def _posted_value(payload: JSONValue) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    value = payload.get("posted")
+    return str(value).strip() if value is not None else ""
 
 
 def _existing_canonical_by_signature(
@@ -498,6 +604,8 @@ def _score_stage(
                 rank_engine=rank_engine,
             )
             if scored_listing is None:
+                conn.execute("DELETE FROM score WHERE listing_id=? AND profile_id=?",
+                             (item.listing.identity.listing_id, profile_id))
                 continue
             updated_listing = scored_listing.listing
             before = _observed_fields(item.listing)
@@ -658,21 +766,29 @@ def _load_seen_source_ids(
     *,
     conn: sqlite3.Connection,
     source_names: tuple[str, ...],
+    refresh_before: datetime,
 ) -> dict[str, set[str]]:
     if not source_names:
         return {}
     placeholders = ",".join("?" for _ in source_names)
     rows = conn.execute(
         f"""
-        SELECT source, source_id
-        FROM listing_source
-        WHERE source IN ({placeholders})
+        SELECT ls.source, ls.source_id, MAX(sr.fetched_at) AS fetched_at
+        FROM listing_source ls
+        JOIN source_record sr ON sr.listing_id=ls.listing_id
+          AND sr.source=ls.source AND sr.source_id=ls.source_id
+        WHERE ls.source IN ({placeholders})
+        GROUP BY ls.source, ls.source_id
         """,
         source_names,
     ).fetchall()
     seen_by_source: dict[str, set[str]] = {name: set() for name in source_names}
     for row in rows:
-        seen_by_source.setdefault(str(row["source"]), set()).add(str(row["source_id"]))
+        fetched = datetime.fromisoformat(str(row["fetched_at"]))
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=UTC)
+        if fetched >= refresh_before:
+            seen_by_source.setdefault(str(row["source"]), set()).add(str(row["source_id"]))
     return seen_by_source
 
 

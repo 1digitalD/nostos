@@ -12,6 +12,7 @@ import extruct
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
+from nostos.enrich.location import point_from_html
 from nostos.enrich.text import infer_area_key_from_neighborhood_text, neighborhood_haystack
 from nostos.model import (
     Absence,
@@ -88,6 +89,9 @@ class KijijiSource:
             return rec
 
         detail_payload = _detail_payload(html=html, base_url=rec.url)
+        point = point_from_html(html)
+        if point:
+            detail_payload["point"] = point
         if not detail_payload:
             return rec
         existing_payload = _mapping_payload(rec.payload)
@@ -122,7 +126,7 @@ class KijijiSource:
             {
                 "raw_address": address,
                 "structured": None,
-                "point": None,
+                "point": payload.get("point"),
                 "area_key": area_key,
             },
             context={"area_vocabulary": ctx.area_vocabulary},

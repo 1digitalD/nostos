@@ -14,7 +14,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from nostos.config.citypack import Citypack, load_citypack
-from nostos.config.profile import ScaledWeight, WeightValue
+from nostos.config.profile import Profile, ScaledWeight, WeightValue, load_profile
 from nostos.config.wizard import (
     PetsPreference,
     PreferenceLevel,
@@ -43,11 +43,19 @@ from nostos.sources import (
     enabled_sources,
     resolve_source_registry,
 )
+from nostos.sources.manual import ManualSource
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ScoreRepo
 from nostos.watch.notify import NullNotifier
 from nostos.watch.runner import run_watch
 from nostos.web.query import ListFilter
+from nostos.workflows import (
+    apply_profile,
+    preview_profile,
+    profile_history,
+    revision,
+)
+from nostos.workflows import candidate as criteria_candidate
 
 DEFAULT_CITYPACK_FILE = "vancouver.yaml"
 DEFAULT_PROFILE_FILE = "profile.yaml"
@@ -57,6 +65,7 @@ DEFAULT_SCHEDULE = "0 */6 * * *"
 SOURCE_FACTORIES: dict[str, type[Source] | Any] = {
     "craigslist": CraigslistSource,
     "kijiji": KijijiSource,
+    "manual": ManualSource,
 }
 
 app = typer.Typer(
@@ -91,7 +100,7 @@ def init_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
         ),
     ] = None,
     force: Annotated[
@@ -206,7 +215,7 @@ def init_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    citypack_path = _resolve_citypack_path(citypack)
+    citypack_path = _resolve_citypack_path(citypack, city=city)
     _require_file(citypack_path, "--citypack")
     loaded_citypack = load_citypack(citypack_path)
 
@@ -348,7 +357,7 @@ def watch_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
         ),
     ] = None,
     source: Annotated[
@@ -379,8 +388,8 @@ def watch_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    db_path = _resolve_db_path(db)
-    citypack_path = _resolve_citypack_path(citypack)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(citypack, profile_path=profile_path)
     _require_file(profile_path, "--profile")
     _require_file(citypack_path, "--citypack")
 
@@ -451,7 +460,7 @@ def rank_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
         ),
     ] = None,
 ) -> None:
@@ -464,8 +473,8 @@ def rank_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    db_path = _resolve_db_path(db)
-    citypack_path = _resolve_citypack_path(citypack)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(citypack, profile_path=profile_path)
     _require_file(profile_path, "--profile")
     _require_file(citypack_path, "--citypack")
     _require_file(db_path, "--db")
@@ -507,7 +516,7 @@ def list_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
         ),
     ] = None,
     limit: Annotated[
@@ -524,8 +533,8 @@ def list_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    db_path = _resolve_db_path(db)
-    citypack_path = _resolve_citypack_path(citypack)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(citypack, profile_path=profile_path)
     _require_file(profile_path, "--profile")
     _require_file(db_path, "--db")
     _require_file(citypack_path, "--citypack")
@@ -605,7 +614,7 @@ def explain_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    db_path = _resolve_db_path(db)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
     _require_file(profile_path, "--profile")
     _require_file(db_path, "--db")
 
@@ -630,6 +639,155 @@ def explain_command(
     typer.echo(explanation)
 
 
+def _criteria_paths(profile: Path | None, db: Path | None) -> tuple[Path, Path, Path]:
+    profile_path = _resolve_profile_path(profile)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(None, profile_path=profile_path)
+    _require_file(profile_path, "--profile")
+    _require_file(citypack_path, "--citypack")
+    return profile_path, db_path, citypack_path
+
+
+def _criteria_source_map() -> dict[str, Source]:
+    return {source.name: source for source in _instantiate_sources(source_names=None)}
+
+
+def _json_object(value: str, *, name: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"{name} must be valid JSON: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{name} must be a JSON object")
+    return payload
+
+
+@app.command("profile-get")
+def profile_get_command(
+    profile: Annotated[
+        Path | None,
+        typer.Option("--profile", help="Profile file path. Defaults to XDG config location."),
+    ] = None,
+) -> None:
+    """Read the active criteria and revision used for guarded edits.
+
+    Examples: nostos profile-get --profile ~/.config/nostos/toronto.yaml
+    """
+    profile_path = _resolve_profile_path(profile)
+    _require_file(profile_path, "--profile")
+    current = load_profile(profile_path)
+    typer.echo(json.dumps({
+        "profile_path": str(profile_path),
+        "revision": revision(current),
+        "profile": current.model_dump(mode="json"),
+    }, indent=2))
+
+
+@app.command("profile-preview")
+def profile_preview_command(
+    patch_json: Annotated[str, typer.Option("--patch-json", help="JSON Merge Patch to preview.")],
+    profile: Annotated[Path | None, typer.Option("--profile")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Preview a criteria patch against stored listings without writing it.
+
+    Examples: nostos profile-preview --patch-json '{"hard":{"rent":{"max":3400}}}'
+    """
+    profile_path, db_path, citypack_path = _criteria_paths(profile, db)
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    proposed = criteria_candidate(context.profile, _json_object(patch_json, name="--patch-json"))
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        result = preview_profile(
+            conn, context=context, proposed=proposed, sources=_criteria_source_map()
+        )
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("profile-apply")
+def profile_apply_command(
+    patch_json: Annotated[str, typer.Option("--patch-json", help="Reviewed JSON Merge Patch.")],
+    expected_revision: Annotated[
+        str,
+        typer.Option(
+            "--expected-revision", help="Revision returned by profile-get or preview."
+        ),
+    ],
+    profile: Annotated[Path | None, typer.Option("--profile")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Apply a reviewed criteria patch if the active revision still matches.
+
+    Examples: nostos profile-apply --patch-json '{}' --expected-revision REVISION
+    """
+    profile_path, db_path, citypack_path = _criteria_paths(profile, db)
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        result = apply_profile(
+            conn,
+            path=profile_path,
+            context=context,
+            patch=_json_object(patch_json, name="--patch-json"),
+            expected_revision=expected_revision,
+            sources=_criteria_source_map(),
+        )
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("profile-history")
+def profile_history_command(
+    profile: Annotated[Path | None, typer.Option("--profile")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """List recent criteria revisions available for audit or undo.
+
+    Examples: nostos profile-history --profile ~/.config/nostos/toronto.yaml
+    """
+    profile_path, db_path, _ = _criteria_paths(profile, db)
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        rows = profile_history(conn, profile_path)
+    typer.echo(json.dumps([
+        {key: row[key] for key in ("id", "revision", "created_at")} for row in rows
+    ], indent=2))
+
+
+@app.command("profile-undo")
+def profile_undo_command(
+    revision_id: Annotated[int, typer.Argument(help="Revision id from profile-history.")],
+    expected_revision: Annotated[
+        str, typer.Option("--expected-revision", help="Current revision from profile-get.")
+    ],
+    profile: Annotated[Path | None, typer.Option("--profile")] = None,
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Restore a prior criteria revision if the active revision still matches.
+
+    Examples: nostos profile-undo 3 --expected-revision REVISION
+    """
+    profile_path, db_path, citypack_path = _criteria_paths(profile, db)
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        match = next(
+            (row for row in profile_history(conn, profile_path) if row["id"] == revision_id),
+            None,
+        )
+        if match is None:
+            raise typer.BadParameter("Revision not found", param_hint="revision_id")
+        target = Profile.model_validate_json(match["payload"])
+        result = apply_profile(
+            conn,
+            path=profile_path,
+            context=context,
+            patch=target.model_dump(mode="json"),
+            expected_revision=expected_revision,
+            sources=_criteria_source_map(),
+        )
+    typer.echo(json.dumps(result, indent=2))
+
+
 @app.command("web")
 def web_command(
     profile: Annotated[
@@ -647,7 +805,7 @@ def web_command(
         Path | None,
         typer.Option(
             "--citypack",
-            help="Citypack YAML/JSON path. Defaults to packaged citypacks/vancouver.yaml.",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
         ),
     ] = None,
     port: Annotated[
@@ -723,8 +881,8 @@ def web_command(
     """
 
     profile_path = _resolve_profile_path(profile)
-    db_path = _resolve_db_path(db)
-    citypack_path = _resolve_citypack_path(citypack)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(citypack, profile_path=profile_path)
     _require_file(profile_path, "--profile")
     _require_file(citypack_path, "--citypack")
     _require_file(db_path, "--db")
@@ -866,27 +1024,46 @@ def _resolve_profile_path(path: Path | None) -> Path:
     return _default_config_dir() / DEFAULT_PROFILE_FILE
 
 
-def _resolve_db_path(path: Path | None) -> Path:
+def _resolve_db_path(path: Path | None, *, profile_path: Path | None = None) -> Path:
     if path is not None:
         return path.expanduser()
-    return _default_data_dir() / DEFAULT_DB_FILE
+    city = _profile_city(profile_path)
+    # Preserve existing Vancouver installations; other cities get isolated stores.
+    directory = _default_data_dir()
+    if city != "vancouver":
+        directory = directory / city
+    return directory / DEFAULT_DB_FILE
 
 
-def _resolve_citypack_path(path: Path | None) -> Path:
+def _profile_city(profile_path: Path | None) -> str:
+    if profile_path is None or not profile_path.exists():
+        return "vancouver"
+    return _safe_city_name(load_profile(profile_path).city)
+
+
+def _safe_city_name(city: str) -> str:
+    if not city or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for char in city):
+        _fail("City must be a lowercase name using letters, digits, hyphens or underscores.")
+    return city
+
+
+def _resolve_citypack_path(
+    path: Path | None, *, city: str | None = None, profile_path: Path | None = None
+) -> Path:
     if path is not None:
         return path.expanduser()
-    for candidate in _default_citypack_candidates():
+    selected_city = _safe_city_name(city) if city is not None else _profile_city(profile_path)
+    candidates = _default_citypack_candidates(selected_city)
+    for candidate in candidates:
         if candidate.exists():
             return candidate
-    return _default_citypack_candidates()[0]
+    return candidates[0]
 
 
-def _default_citypack_candidates() -> list[Path]:
-    package_citypack = Path(__file__).resolve().parent / "citypacks" / DEFAULT_CITYPACK_FILE
-    return [
-        Path.cwd() / "citypacks" / DEFAULT_CITYPACK_FILE,
-        package_citypack,
-    ]
+def _default_citypack_candidates(city: str = "vancouver") -> list[Path]:
+    filename = f"{city}.yaml"
+    package_citypack = Path(__file__).resolve().parent / "citypacks" / filename
+    return [Path.cwd() / "citypacks" / filename, package_citypack]
 
 
 def _default_config_dir() -> Path:

@@ -112,6 +112,17 @@ class ActionRepo:
         ).fetchone()
         return row is not None
 
+    def toggle_flag(self, *, listing_id: str, kind: ActionKind) -> bool:
+        """Toggle a state flag and return its new state."""
+        if kind not in self._FLAG_KINDS:
+            raise ValueError(f"{kind!r} is not a toggle flag")
+        existing = self._existing_id(listing_id=listing_id, kind=kind)
+        if existing is not None:
+            self._conn.execute("DELETE FROM listing_action WHERE id = ?", (existing,))
+            return False
+        self.record_action(listing_id=listing_id, kind=kind)
+        return True
+
     def action_states_for(
         self, *, listing_ids: tuple[str, ...]
     ) -> dict[str, dict[str, bool]]:

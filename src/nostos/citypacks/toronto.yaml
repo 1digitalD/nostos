@@ -1,0 +1,181 @@
+{
+  "name": "toronto",
+  "locale": {
+    "language": "en-CA",
+    "timezone": "America/Toronto",
+    "currency": "CAD",
+    "area_unit": "sqft"
+  },
+  "areas": [
+    {
+      "key": "liberty_village",
+      "label": "Liberty Village",
+      "keywords": [
+        "liberty village"
+      ],
+      "bbox": [
+        43.632,
+        -79.432,
+        43.645,
+        -79.414
+      ]
+    },
+    {
+      "key": "cityplace",
+      "label": "CityPlace",
+      "keywords": [
+        "cityplace",
+        "city place",
+        "fort york"
+      ],
+      "bbox": [
+        43.635,
+        -79.411,
+        43.646,
+        -79.386
+      ]
+    },
+    {
+      "key": "waterfront",
+      "label": "Waterfront",
+      "keywords": [
+        "harbourfront",
+        "queens quay",
+        "waterfront"
+      ],
+      "bbox": [
+        43.633,
+        -79.404,
+        43.647,
+        -79.352
+      ]
+    },
+    {
+      "key": "annex",
+      "label": "The Annex",
+      "keywords": [
+        "the annex",
+        "annex"
+      ],
+      "bbox": [
+        43.663,
+        -79.422,
+        43.679,
+        -79.394
+      ]
+    },
+    {
+      "key": "yorkville",
+      "label": "Yorkville",
+      "keywords": [
+        "yorkville"
+      ],
+      "bbox": [
+        43.668,
+        -79.4,
+        43.678,
+        -79.381
+      ]
+    },
+    {
+      "key": "midtown",
+      "label": "Midtown",
+      "keywords": [
+        "yonge and eglinton",
+        "yonge-eglinton",
+        "midtown",
+        "davisville"
+      ],
+      "bbox": [
+        43.69,
+        -79.421,
+        43.716,
+        -79.378
+      ]
+    },
+    {
+      "key": "high_park",
+      "label": "High Park / Junction",
+      "keywords": [
+        "high park",
+        "the junction",
+        "roncesvalles"
+      ],
+      "bbox": [
+        43.637,
+        -79.478,
+        43.674,
+        -79.436
+      ]
+    },
+    {
+      "key": "east_end",
+      "label": "Leslieville / Riverdale / Beaches",
+      "keywords": [
+        "leslieville",
+        "riverdale",
+        "the beaches",
+        "the beach"
+      ],
+      "bbox": [
+        43.651,
+        -79.361,
+        43.69,
+        -79.275
+      ]
+    },
+    {
+      "key": "downtown",
+      "label": "Downtown Toronto",
+      "keywords": [
+        "downtown",
+        "king west",
+        "queen west",
+        "corktown",
+        "st lawrence",
+        "st. lawrence"
+      ],
+      "bbox": [
+        43.638,
+        -79.42,
+        43.672,
+        -79.352
+      ]
+    }
+  ],
+  "sources": {
+    "craigslist": {
+      "enabled": true,
+      "load_bearing": false,
+      "base_url": "https://toronto.craigslist.org",
+      "areas": [
+        "tor"
+      ]
+    },
+    "kijiji": {
+      "enabled": true,
+      "load_bearing": false,
+      "regions": [
+        {
+          "path": "city-of-toronto",
+          "id": "c37l1700273"
+        }
+      ]
+    }
+  },
+  "address": {
+    "directional": {
+      "w": "west",
+      "e": "east",
+      "n": "north",
+      "s": "south"
+    },
+    "strip_tokens": [
+      "toronto"
+    ],
+    "region_tokens": [
+      "on",
+      "ontario"
+    ]
+  }
+}

@@ -189,6 +189,81 @@ def explain(
     return _invoke_cli(argv)
 
 
+@mcp.tool()
+def profile_get(profile: str | None = None) -> str:
+    """Read criteria and the revision required to safely preview or apply changes."""
+    argv = ["profile-get"]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    return _invoke_cli(argv)
+
+
+@mcp.tool()
+def profile_preview(
+    patch_json: str,
+    profile: str | None = None,
+    db: str | None = None,
+) -> str:
+    """Preview a JSON Merge Patch against stored listings without writing or fetching."""
+    argv = ["profile-preview", "--patch-json", patch_json]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    if db is not None:
+        _append_option(argv, "--db", db)
+    return _invoke_cli(argv)
+
+
+@mcp.tool()
+def profile_apply(
+    patch_json: str,
+    expected_revision: str,
+    profile: str | None = None,
+    db: str | None = None,
+) -> str:
+    """Apply a previously reviewed criteria patch if its base revision is still current."""
+    argv = [
+        "profile-apply", "--patch-json", patch_json,
+        "--expected-revision", expected_revision,
+    ]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    if db is not None:
+        _append_option(argv, "--db", db)
+    return _invoke_cli(argv)
+
+
+@mcp.tool(name="profile_history")
+def profile_history_command(
+    profile: str | None = None,
+    db: str | None = None,
+) -> str:
+    """List recent criteria revisions available for audit or undo."""
+    argv = ["profile-history"]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    if db is not None:
+        _append_option(argv, "--db", db)
+    return _invoke_cli(argv)
+
+
+@mcp.tool(name="profile_undo")
+def profile_undo_command(
+    revision_id: int,
+    expected_revision: str,
+    profile: str | None = None,
+    db: str | None = None,
+) -> str:
+    """Restore one listed criteria revision, guarded by the current revision."""
+    argv = [
+        "profile-undo", str(revision_id), "--expected-revision", expected_revision,
+    ]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    if db is not None:
+        _append_option(argv, "--db", db)
+    return _invoke_cli(argv)
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

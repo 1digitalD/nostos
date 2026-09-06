@@ -859,6 +859,52 @@ def test_cross_source_dedupe_holds_across_two_runs(tmp_path: Path) -> None:
         assert [str(row["source"]) for row in source_rows] == ["alpha", "beta"]
 
 
+def test_same_source_repost_with_matching_unit_evidence_collapses(tmp_path: Path) -> None:
+    """A repost is safe to merge when photo, exact facts and coordinates all match."""
+    db_path = tmp_path / "nostos.db"
+    context = _build_context(
+        source_flags={"alpha": {"enabled": True, "load_bearing": False}}
+    )
+
+    def repost_record(suffix: int, minutes: int) -> SourceRecord:
+        record = _make_record(
+            "alpha", suffix, minutes=minutes, signature="city of toronto|2400"
+        )
+        payload = dict(cast(dict[str, Any], record.payload))
+        payload.update({
+            "photo": "https://images.example.test/shared-unit.jpg?size=600",
+            "rent": 2400,
+            "beds": 2,
+            "baths": 2,
+            "point": {"lat": 43.6629, "lng": -79.3987},
+            "posted": f"2026-01-0{suffix}T12:00:00Z",
+        })
+        return record.model_copy(update={"payload": payload})
+
+    source = ScriptedSource(
+        name="alpha",
+        records=(repost_record(1, 1), repost_record(2, 2)),
+    )
+
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        run_watch(
+            conn=conn,
+            context=context,
+            sources=(source,),
+            profile_id="balanced",
+            run_id="run-same-source-repost",
+            now=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        listing_rows = conn.execute("SELECT id FROM listing ORDER BY id").fetchall()
+        assert [str(row["id"]) for row in listing_rows] == ["alpha:alpha-1"]
+        source_rows = conn.execute(
+            "SELECT source_id FROM listing_source ORDER BY source_id"
+        ).fetchall()
+        assert [str(row["source_id"]) for row in source_rows] == ["alpha-1", "alpha-2"]
+
+
 def test_same_source_signature_collision_does_not_merge(tmp_path: Path) -> None:
     """Known limitation, made explicit: the signature is address tokens plus a
     coarse price bucket, so two different units in the same building at the
@@ -1326,4 +1372,3 @@ class RecordingNotifier:
 
     def send(self, *, title: str, body: str) -> None:
         self.messages.append(NotificationMessage(title=title, body=body))
-

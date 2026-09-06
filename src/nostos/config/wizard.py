@@ -88,6 +88,9 @@ def build_profile_payload(*, answers: WizardAnswers, citypack: Citypack) -> dict
     if answers.min_area is not None:
         hard_payload["area"] = {"min": answers.min_area, "unit": citypack.locale.area_unit}
 
+    hard_payload["require_laundry"] = answers.laundry == PreferenceLevel.DEAL_BREAKER
+    hard_payload["require_parking"] = answers.parking == PreferenceLevel.DEAL_BREAKER
+
     weights: dict[str, object] = {}
     laundry_weight = _laundry_weight(answers.laundry)
     if laundry_weight != 0:

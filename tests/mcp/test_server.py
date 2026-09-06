@@ -7,7 +7,12 @@ import pytest
 
 from nostos.mcp import server as mcp_server
 
-CLI_COMMANDS = frozenset({"init", "watch", "rank", "list", "explain"})
+CLI_COMMANDS = frozenset(
+    {
+        "init", "watch", "rank", "list", "explain",
+        "profile_get", "profile_preview", "profile_apply", "profile_history", "profile_undo",
+    }
+)
 
 TOOL_CLI_FLAGS: dict[str, frozenset[str]] = {
     "init": frozenset(
@@ -37,6 +42,11 @@ TOOL_CLI_FLAGS: dict[str, frozenset[str]] = {
     "rank": frozenset({"profile", "db", "citypack"}),
     "list": frozenset({"profile", "db", "citypack", "limit"}),
     "explain": frozenset({"listing_id", "profile", "db"}),
+    "profile_get": frozenset({"profile"}),
+    "profile_preview": frozenset({"patch_json", "profile", "db"}),
+    "profile_apply": frozenset({"patch_json", "expected_revision", "profile", "db"}),
+    "profile_history": frozenset({"profile", "db"}),
+    "profile_undo": frozenset({"revision_id", "expected_revision", "profile", "db"}),
 }
 
 

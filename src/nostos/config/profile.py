@@ -3,8 +3,9 @@ from __future__ import annotations
 import importlib
 import json
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
-from typing import Annotated, Protocol, cast
+from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import (
     BaseModel,
@@ -100,6 +101,12 @@ class HardFilters(BaseModel):
     # whose area is unknown passes (it is flagged unverified in the UI).
     areas: list[NonEmptyStr] = Field(default_factory=list)
     exclude: list[NonEmptyStr] = Field(default_factory=list)
+    require_laundry: bool = False
+    require_parking: bool = False
+    available_by: date | None = None
+    lease_months_min: float | None = Field(default=None, ge=0)
+    total_monthly_max: float | None = Field(default=None, ge=0)
+
 
 
 class ScaledWeight(BaseModel):
@@ -141,10 +148,22 @@ class ConfidenceConfig(BaseModel):
 WeightValue = float | ScaledWeight
 
 
+class Landmark(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: NonEmptyStr
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    source_url: str
+    weight: float = Field(default=0, ge=0)
+    within_km: float = Field(default=5, gt=0)
+
+
 class Profile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     city: NonEmptyStr
+    unknown_policy: Literal["exclude", "review"] = "exclude"
+    landmark: Landmark | None = None
     hard: HardFilters = Field(default_factory=HardFilters)
     weights: dict[NonEmptyStr, WeightValue] = Field(default_factory=dict)
     area_key_weights: dict[NonEmptyStr, float] = Field(default_factory=dict)

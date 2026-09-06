@@ -15,6 +15,7 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
+from nostos.enrich.location import point_from_html
 from nostos.model import (
     Absence,
     Area,
@@ -267,7 +268,7 @@ class CraigslistSource:
         place = Place(
             raw_address=raw_address or None,
             structured=None,
-            point=None,
+            point=payload.get("point"),
             area_key=area_key,
         )
 
@@ -534,6 +535,9 @@ def _extract_price(text: str) -> int:
 def _parse_detail_html(html: str) -> dict[str, Any]:
     node = HTMLParser(html)
     result: dict[str, Any] = {}
+    point = point_from_html(html)
+    if point:
+        result["point"] = point
 
     title = _meta_content(node, "og:title") or _first_text(node, "title")
     if title:

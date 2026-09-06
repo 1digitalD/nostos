@@ -36,6 +36,7 @@
   {% endif %}
 
   <form method="post" action="/profile" class="profile-form pf-form" id="profile-form" novalidate>
+    <input type="hidden" name="expected_revision" value="{{ profile_revision }}">
 
     <!-- ============================== Hard filters ============================== -->
     <fieldset class="profile-section pf-section" id="hard">
@@ -109,9 +110,37 @@
                  value="{{ sub.get('area_min') }}" aria-describedby="area_min_hint">
           <small id="area_min_hint" class="pf-hint">Listings without a stated size are removed when this is set.</small>
         </div>
+        <div class="pf-field">
+          <label for="available_by">Available by</label>
+          <input type="date" id="available_by" name="available_by"
+                 value="{{ sub.get('available_by') }}" aria-describedby="available_by_hint">
+          <small id="available_by_hint" class="pf-hint">Remove homes available after your move-in deadline.</small>
+        </div>
+        <div class="pf-field">
+          <label for="lease_months_min">Minimum lease <span class="pf-unit">months</span></label>
+          <input type="number" id="lease_months_min" name="lease_months_min" step="1" min="0"
+                 value="{{ sub.get('lease_months_min') }}" aria-describedby="lease_months_min_hint">
+          <small id="lease_months_min_hint" class="pf-hint">Remove listings whose stated lease is shorter.</small>
+        </div>
+        <div class="pf-field">
+          <label for="total_monthly_max">Total monthly cost max <span class="pf-unit">{{ currency }}/mo</span></label>
+          <input type="number" id="total_monthly_max" name="total_monthly_max" step="50" min="0"
+                 value="{{ sub.get('total_monthly_max') }}" aria-describedby="total_monthly_max_hint">
+          <small id="total_monthly_max_hint" class="pf-hint">Use rent plus stated recurring fees when available.</small>
+        </div>
       </div>
 
       <div class="pf-checks">
+        <label class="pf-check">
+          <input type="checkbox" id="require_laundry" name="require_laundry"
+                 {% if sub.checked('require_laundry') %}checked{% endif %}>
+          <span>Require in-suite laundry</span>
+        </label>
+        <label class="pf-check">
+          <input type="checkbox" id="require_parking" name="require_parking"
+                 {% if sub.checked('require_parking') %}checked{% endif %}>
+          <span>Require parking</span>
+        </label>
         {% for ex in exclude_tokens %}
           <label class="pf-check">
             <input type="checkbox" id="{{ ex.field }}" name="{{ ex.field }}"
@@ -261,12 +290,15 @@
     </fieldset>
   </form>
 
-  <!-- Sticky action bar: Save submits the form above; Re-score is its own POST. -->
+  <!-- Save validates, snapshots and atomically activates the new rankings. -->
   <div class="pf-actionbar">
-    <button type="submit" form="profile-form" class="pf-btn pf-btn-primary">Save</button>
-    <form method="post" action="/profile/rescore" class="pf-inline-form">
-      <button type="submit" class="pf-btn" title="Recompute scores for every stored listing with the saved profile">Re-score now</button>
-    </form>
+    <button type="submit" form="profile-form" class="pf-btn pf-btn-primary">Save and update rankings</button>
+    <button type="submit" form="profile-form" formaction="/profile/preview" class="pf-btn">Preview impact</button>
+    {% if has_history %}
+      <form method="post" action="/profile/undo" class="pf-inline-form">
+        <button type="submit" class="pf-btn">Undo last criteria change</button>
+      </form>
+    {% endif %}
     <a class="pf-btn pf-btn-ghost" href="/profile">Reset to saved</a>
     <span class="pf-dirty" id="pf-dirty" hidden>Unsaved changes</span>
     <span class="profile-path pf-path">profile: <code>{{ profile_path }}</code></span>

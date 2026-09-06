@@ -93,6 +93,48 @@ class RankEngine:
             total += location_term.contribution
             contributions.append(location_term)
 
+        from nostos.enrich.location import distance_km
+        from nostos.rank.criteria import classify_match_status
+        landmark = self._profile.landmark
+        if landmark is not None and landmark.weight:
+            distance = distance_km(listing, landmark)
+            magnitude = max(0.0, 1 - distance / landmark.within_km) if distance is not None else 0.0
+            amount = landmark.weight * magnitude
+            evidence = (
+                f"{distance:.2f} km straight-line from source map pin to {landmark.name}"
+                if distance is not None
+                else "Source coordinates unstated; no proximity bonus"
+            )
+            contributions.append(RuleContribution(
+                rule_key="landmark.distance", category="proximity", label=f"Near {landmark.name}",
+                weight=landmark.weight, signal=Signal(fired=distance is not None,
+                    magnitude=magnitude, confidence=1, evidence=evidence),
+                shaped_magnitude=magnitude, confidence_factor=1, min_possible=0,
+                max_possible=landmark.weight, contribution=amount))
+            max_possible += landmark.weight
+            total += amount
+        penalty = max(0, self._profile.confidence.unverified_penalty)
+        if penalty:
+            unknown = classify_match_status(listing, self._profile).status == "unverified"
+            amount = -penalty if unknown else 0.0
+            contributions.append(RuleContribution(
+                rule_key="confidence.unverified",
+                category="amenities",
+                label="Missing criteria facts",
+                weight=-penalty,
+                signal=Signal(
+                    fired=unknown,
+                    magnitude=float(unknown),
+                    confidence=1,
+                    evidence=(
+                        "Required facts are missing" if unknown else "Criteria facts available"
+                    ),
+                ),
+                shaped_magnitude=float(unknown), confidence_factor=1,
+                min_possible=-penalty, max_possible=0, contribution=amount))
+            min_possible -= penalty
+            total += amount
+
         normalization = NormalizationWindow(min_possible=min_possible, max_possible=max_possible)
         score = _normalize(total=total, window=normalization)
 

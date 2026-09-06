@@ -20,6 +20,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from nostos.model.source_record import SourceRecord
+from nostos.sources.craigslist import CraigslistSource
 from nostos.store.actions import ActionRepo
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ListingRepo, ScoreRepo
@@ -233,28 +234,30 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     with connect(db_path) as conn:
         assert ActionRepo(conn).has_action(listing_id=listing_id, kind="star")
 
-    # POST star again -> still only one row (idempotency).
+    # Detail page reflects the starred state and keeps the button reversible.
+    resp = client.get(f"/listings/{listing_id}")
+    body = resp.text
+    assert "★ Shortlisted" in body
+    assert "btn-star is-on" in body
+    assert 'aria-pressed="true"' in body
+    assert "disabled" not in body.split('data-action="star"', 1)[1].split(">", 1)[0]
+
+    # POST star again -> correction toggles the state off.
     resp = client.post(f"/listings/{listing_id}/star", follow_redirects=False)
     assert resp.status_code == 303
     with connect(db_path) as conn:
         repo = ActionRepo(conn)
-        assert len(repo.get_actions(listing_id=listing_id)) == 1
+        assert len(repo.get_actions(listing_id=listing_id)) == 0
 
-    # Detail page now reflects the starred state.
+    # Both surfaces now reflect the correction.
     resp = client.get(f"/listings/{listing_id}")
     body = resp.text
-    assert "★ Shortlisted" in body
-    assert 'btn-star is-on' in body
-    assert "aria-pressed=\"true\"" in body
+    assert "★ Shortlist" in body
+    assert "btn-star is-on" not in body
 
-    # List view shows the starred state on the card.
     resp = client.get("/")
     body = resp.text
-    assert "is-starred" in body
-    # The star button on the card carries the is-on modifier.
-    assert 'data-action="star"' in body
-    assert 'data-listing="craigslist:seed-1"' in body
-    assert 'class="card-action-btn is-on"' in body
+    assert "card is-starred" not in body
 
 
 def test_post_note_is_recorded_and_truncated(tmp_path: Path) -> None:
@@ -349,6 +352,40 @@ def test_invalid_sort_falls_back_to_score(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert "Sunny 2BR in Kitsilano" in resp.text
 
+
+def test_index_paginates_large_result_sets(tmp_path: Path, monkeypatch: Any) -> None:
+    client, db_path, profile_id = _client(tmp_path)
+    for index in range(40):
+        _seed_listing(
+            db_path,
+            profile_id,
+            f"craigslist:page-{index:02d}",
+            score=float(100 - index),
+        )
+
+    original_to_listing = CraigslistSource.to_listing
+    replay_count = 0
+
+    def counted_to_listing(*args: Any, **kwargs: Any) -> Any:
+        nonlocal replay_count
+        replay_count += 1
+        return original_to_listing(*args, **kwargs)
+
+    monkeypatch.setattr(CraigslistSource, "to_listing", counted_to_listing)
+
+    first = client.get("/")
+    assert first.status_code == 200
+    assert len(_card_ids(first.text)) == 36
+    assert replay_count == 37
+    assert "Showing 36 listings" in first.text
+    assert 'href="/?page=2"' in first.text
+
+    second = client.get("/", params={"page": 2})
+    assert second.status_code == 200
+    assert len(_card_ids(second.text)) == 4
+    assert "Showing 4 listings · page 2" in second.text
+    assert 'href="/?page=1"' in second.text
+
 def _client(tmp_path: Path, **profile_kwargs: Any) -> tuple[TestClient, Path, str]:
     db_path, profile_path, citypack_path = _seed_profile_and_citypack(tmp_path, **profile_kwargs)
     with connect(db_path) as conn:
@@ -359,6 +396,33 @@ def _client(tmp_path: Path, **profile_kwargs: Any) -> tuple[TestClient, Path, st
 
 def _card_ids(body: str) -> list[str]:
     return re.findall(r'data-listing-id="([^"]+)"', body)
+
+
+def test_index_form_allows_blank_numeric_filters_and_reapplication(tmp_path: Path) -> None:
+    client, db_path, profile_id = _client(tmp_path)
+    _seed_listing(db_path, profile_id, "craigslist:seed-1")
+    # The browser includes every named field, even unset number inputs, when
+    # Apply is clicked or the sort select automatically submits the form.
+    params = dict.fromkeys(
+        ("rent_min", "rent_max", "beds", "baths_min", "area_min", "score_min", "source"),
+        "",
+    )
+    params["sort"] = "score"
+    response = client.get("/", params=params)
+    assert response.status_code == 200
+    assert _card_ids(response.text) == ["craigslist:seed-1"]
+
+    params["rent_max"] = "1"
+    response = client.get("/", params=params)
+    assert response.status_code == 200
+    assert _card_ids(response.text) == []
+
+    params["rent_max"] = ""
+    response = client.get("/", params=params)
+    assert response.status_code == 200
+    assert _card_ids(response.text) == ["craigslist:seed-1"]
+    for key, invalid in (("rent_min", "-1"), ("beds", "abc"), ("score_min", "101")):
+        assert client.get("/", params={**params, key: invalid}).status_code == 422
 
 
 def test_index_filter_bar_renders_chips_sorts_and_profile_summary(tmp_path: Path) -> None:
