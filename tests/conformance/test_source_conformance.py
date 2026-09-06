@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from nostos.config.citypack import Citypack
+from nostos.config.citypack import Citypack, load_citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
 from nostos.model import (
@@ -22,6 +22,7 @@ from nostos.model import (
 from nostos.sources.base import Capabilities, Liveness, Source
 from nostos.sources.craigslist import CraigslistSource
 from nostos.sources.kijiji import KijijiSource
+from nostos.sources.realtor_ca import RealtorCaSource
 
 CRAIGSLIST_FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
 
@@ -48,6 +49,17 @@ def test_kijiji_source_passes_conformance_with_jsonld_discovery() -> None:
     source = KijijiSource(fetcher=ConformanceFixtureFetcher(search_html, detail_html))
     context = _build_context_for_kijiji()
     assert_source_conforms(source=source, context=context)
+
+
+def test_realtor_ca_source_passes_conformance_with_rendered_fixtures() -> None:
+    fixture_dir = Path(__file__).resolve().parent.parent / "fixtures" / "realtor_ca"
+    search_html = (fixture_dir / "search_toronto.html").read_text(encoding="utf-8")
+    detail_html = (fixture_dir / "detail_30240799.html").read_text(encoding="utf-8")
+    source = RealtorCaSource(
+        fetcher=ConformanceRealtorFetcher(search_html, detail_html),
+        now_provider=lambda: datetime(2026, 9, 6, 12, tzinfo=UTC),
+    )
+    assert_source_conforms(source=source, context=_build_context_for_realtor())
 
 
 def assert_source_conforms(*, source: Source, context: SearchContext) -> None:
@@ -298,6 +310,37 @@ class ConformanceFixtureFetcher:
         if "/v-apartments-condos/" in url:
             return self._detail_html
         raise AssertionError(f"Unexpected URL {url!r}")
+
+
+class ConformanceRealtorFetcher:
+    def __init__(self, search_html: str, detail_html: str) -> None:
+        self._search_html = search_html
+        self._detail_html = detail_html
+
+    def __call__(self, url: str) -> str:
+        if "/map#" in url:
+            return self._search_html
+        if "/real-estate/30240799/" in url:
+            return self._detail_html
+        raise AssertionError(f"Unexpected URL {url!r}")
+
+
+def _build_context_for_realtor() -> SearchContext:
+    citypack_path = (
+        Path(__file__).resolve().parents[2] / "src" / "nostos" / "citypacks" / "toronto.yaml"
+    )
+    citypack = load_citypack(citypack_path)
+    profile = Profile.model_validate(
+        {
+            "city": "toronto",
+            "hard": {"beds": {"eq": 2}, "exclude": []},
+            "weights": {},
+            "sources": {"realtor_ca": "on"},
+            "notify": [],
+            "schedule": "0 */6 * * *",
+        }
+    )
+    return SearchContext(citypack=citypack, profile=profile)
 
 
 def _build_context_for_kijiji() -> SearchContext:

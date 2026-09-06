@@ -29,6 +29,7 @@ from nostos.rank.rules import DEFAULT_REGISTRY
 from nostos.sources import (
     CraigslistSource,
     KijijiSource,
+    RealtorCaSource,
     Source,
 )
 from nostos.sources.manual import ManualSource
@@ -291,6 +292,7 @@ class AppState:
         sources = (
             CraigslistSource(),
             KijijiSource(),
+            RealtorCaSource(),
             ManualSource(),
         )
         return context, {item.name: item for item in sources}

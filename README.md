@@ -59,10 +59,24 @@ search stays available. These numbers are examples; choose your own criteria:
 
 ```bash
 nostos init --non-interactive --city toronto --profile ~/.config/nostos/toronto.yaml \
-  --max-rent 3200 --beds 2 --laundry nice-to-have --source craigslist --source kijiji
+  --max-rent 3200 --beds 2 --laundry nice-to-have --source craigslist --source kijiji \
+  --source realtor_ca
 nostos watch --profile ~/.config/nostos/toronto.yaml --yes
 nostos web --profile ~/.config/nostos/toronto.yaml
 ```
+
+Realtor.ca is an optional Toronto browser source. Install the browser extra and Google
+Chrome before enabling it:
+
+```bash
+pip install 'nostos-cli[browser]'
+```
+
+The adapter uses a dedicated persistent Chrome context, opens a normal Chrome window,
+respects Realtor.ca's `robots.txt`, and spaces navigations at five-second intervals.
+Realtor.ca does not currently serve its search application to headless Chrome. The
+source therefore fails with a clear source-level error when Chrome or the browser extra
+is unavailable; Craigslist and Kijiji continue independently.
 
 Commands infer the citypack from the profile's city. Vancouver keeps its existing
 DB default; Toronto uses `toronto/nostos.db` beneath the data directory (or
@@ -74,8 +88,9 @@ unless `--force` is supplied.
 The first Toronto scope is the City of Toronto, not the entire GTA. Neighbourhood
 keywords and bounding boxes are approximate discovery labels, not verified boundaries
 or commute calculations. Unknown areas remain unknown. Both adapters passed a bounded
-live discovery/detail probe on 2026-09-04; this is not a guarantee of continuing
-coverage. Neither is marked load-bearing until sustained volume has been observed.
+live discovery/detail probe on 2026-09-04; Realtor.ca's rendered search response was
+also probed on 2026-09-06. These checks are not a guarantee of continuing coverage.
+No Toronto adapter is marked load-bearing until sustained volume has been observed.
 The UI browses and edits criteria; fetching is started with `nostos watch` or the MCP
 watch tool. See [the implementation review](docs/11-implementation-review.md) for
 criteria limitations and the next iteration workflow.

@@ -161,6 +161,11 @@
           "id": "c37l1700273"
         }
       ]
+    },
+    "realtor_ca": {
+      "enabled": true,
+      "load_bearing": false,
+      "browser": "chrome"
     }
   },
   "address": {

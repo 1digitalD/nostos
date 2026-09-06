@@ -1,0 +1,39 @@
+{
+  "ErrorCode": {"Id": 200, "Description": "Success - OK"},
+  "Paging": {"RecordsPerPage": 2, "CurrentPage": 1, "TotalRecords": 2},
+  "Results": [
+    {
+      "Id": "30240799",
+      "PublicRemarks": "Spacious condo with In suite Laundry.",
+      "Building": {
+        "BathroomTotal": "2",
+        "Bedrooms": "2",
+        "Ammenities": "Security/Concierge, Exercise Centre, Party Room",
+        "FloorAreaMeasurements": [{"AreaUnformatted": "800-899 sqft"}]
+      },
+      "Individual": [{"Organization": {"Name": "ANJIA REALTY"}}],
+      "Property": {
+        "LeaseRent": "$3,300/Monthly",
+        "LeaseRentUnformattedValue": "3300",
+        "Address": {
+          "AddressText": "622 - 585 BLOOR STREET E|Toronto (North St. James Town), Ontario M4W0B3",
+          "Longitude": "-79.3722379",
+          "Latitude": "43.6717031"
+        },
+        "ParkingSpaceTotal": "1",
+        "AmmenitiesNearBy": "Park, Public Transit, Shopping",
+        "Photo": [{"HighResPath": "https://cdn.realtor.ca/listings/example/c13749958_1.jpg"}]
+      },
+      "RelativeDetailsURL": "/real-estate/30240799/622-585-bloor-street-e-toronto-north-st-james-town"
+    },
+    {
+      "Id": "30240853",
+      "Building": {"BathroomTotal": "2", "Bedrooms": "2"},
+      "Property": {
+        "LeaseRentUnformattedValue": "2600",
+        "Address": {"AddressText": "1209 - 10 FLAVELLE TRAIL|Vaughan, Ontario"}
+      },
+      "RelativeDetailsURL": "/real-estate/30240853/1209-10-flavelle-trail-vaughan"
+    }
+  ]
+}

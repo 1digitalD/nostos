@@ -24,6 +24,9 @@ dependencies = [
   "uvicorn[standard]>=0.52.4",
 ]
 
+[project.optional-dependencies]
+browser = ["playwright>=1.55.0"]
+
 [project.urls]
 Homepage = "https://github.com/1digitalD/nostos"
 Repository = "https://github.com/1digitalD/nostos"

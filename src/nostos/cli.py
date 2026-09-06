@@ -39,6 +39,7 @@ from nostos.rank.rules import Signal
 from nostos.sources import (
     CraigslistSource,
     KijijiSource,
+    RealtorCaSource,
     Source,
     enabled_sources,
     resolve_source_registry,
@@ -66,6 +67,7 @@ SOURCE_FACTORIES: dict[str, type[Source] | Any] = {
     "craigslist": CraigslistSource,
     "kijiji": KijijiSource,
     "manual": ManualSource,
+    "realtor_ca": RealtorCaSource,
 }
 
 app = typer.Typer(

@@ -3,6 +3,7 @@
 from nostos.sources.base import Capabilities, Liveness, Source
 from nostos.sources.craigslist import CraigslistSource
 from nostos.sources.kijiji import KijijiSource
+from nostos.sources.realtor_ca import RealtorCaSource
 from nostos.sources.registry import (
     SourceOffReason,
     SourceResolution,
@@ -14,6 +15,7 @@ __all__ = [
     "Capabilities",
     "CraigslistSource",
     "KijijiSource",
+    "RealtorCaSource",
     "Liveness",
     "Source",
     "SourceOffReason",

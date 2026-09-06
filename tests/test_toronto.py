@@ -1,4 +1,5 @@
 """Toronto user workflow with synthetic source responses; no network required."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -10,11 +11,22 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 import nostos.cli as cli
+from nostos.config.citypack import load_citypack
 from nostos.config.profile import load_profile
 from nostos.context import load_search_context
 from nostos.sources.craigslist import CraigslistSource
 from nostos.sources.kijiji import KijijiSource
+from nostos.sources.realtor_ca import RealtorCaSource
 from nostos.web.app import create_app
+
+
+def test_realtor_ca_is_enabled_only_in_toronto_citypack() -> None:
+    citypack_dir = Path(__file__).resolve().parents[1] / "src" / "nostos" / "citypacks"
+    toronto = load_citypack(citypack_dir / "toronto.yaml")
+    vancouver = load_citypack(citypack_dir / "vancouver.yaml")
+
+    assert toronto.sources["realtor_ca"].enabled is True
+    assert "realtor_ca" not in vancouver.sources
 
 
 def test_toronto_init_watch_rank_browse_and_correct(
@@ -22,10 +34,23 @@ def test_toronto_init_watch_rank_browse_and_correct(
 ) -> None:
     monkeypatch.setenv("NOSTOS_HOME", str(tmp_path))
     runner = CliRunner()
-    result = runner.invoke(cli.app, [
-        "init", "--non-interactive", "--city", "toronto", "--max-rent", "3200",
-        "--beds", "2", "--laundry", "nice-to-have", "--source", "craigslist",
-    ])
+    result = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--city",
+            "toronto",
+            "--max-rent",
+            "3200",
+            "--beds",
+            "2",
+            "--laundry",
+            "nice-to-have",
+            "--source",
+            "craigslist",
+        ],
+    )
     assert result.exit_code == 0, result.output
     profile = tmp_path / "profile.yaml"
     assert load_profile(profile).city == "toronto"
@@ -40,13 +65,13 @@ def test_toronto_init_watch_rank_browse_and_correct(
         assert urlparse(url).hostname == "toronto.craigslist.org"
         if "/search/" in url:
             assert "/search/tor/apa" in url
-            return '''<?xml version="1.0"?><rss version="2.0"><channel><item>
+            return """<?xml version="1.0"?><rss version="2.0"><channel><item>
               <title>Liberty Village two bedroom</title>
               <link>https://toronto.craigslist.org/tor/apa/d/liberty-village/1234567890</link>
               <description>$2800 / 2br - 850ft2</description>
               <pubDate>Fri, 04 Sep 2026 12:00:00 GMT</pubDate>
-            </item></channel></rss>'''
-        return '''<html><head><script type="application/ld+json" id="ld_posting_data">
+            </item></channel></rss>"""
+        return """<html><head><script type="application/ld+json" id="ld_posting_data">
           {"@context":"http://schema.org","@type":"House",
            "name":"Liberty Village two bedroom", "numberOfBedrooms":2,
            "numberOfBathroomsTotal":1,
@@ -54,11 +79,15 @@ def test_toronto_init_watch_rank_browse_and_correct(
           </script></head><body><span id="titletextonly">Liberty Village two bedroom</span>
           <span class="price">$2800</span><section id="postingbody">
           Unfurnished 2BR apartment with 1 bath and in-suite laundry. 850 sqft.
-          </section></body></html>'''
+          </section></body></html>"""
 
-    monkeypatch.setitem(cli.SOURCE_FACTORIES, "craigslist", lambda: CraigslistSource(
-        fetch_text=fetch, now=lambda: datetime(2026, 9, 4, 13, tzinfo=UTC)
-    ))
+    monkeypatch.setitem(
+        cli.SOURCE_FACTORIES,
+        "craigslist",
+        lambda: CraigslistSource(
+            fetch_text=fetch, now=lambda: datetime(2026, 9, 4, 13, tzinfo=UTC)
+        ),
+    )
     watched = runner.invoke(cli.app, ["watch", "--yes"])
     assert watched.exit_code == 0, watched.output
     assert urls
@@ -90,8 +119,17 @@ def test_toronto_kijiji_scope_and_unknown_city(
 ) -> None:
     monkeypatch.setenv("NOSTOS_HOME", str(tmp_path))
     runner = CliRunner()
-    common = ["--non-interactive", "--max-rent", "3200", "--beds", "2",
-              "--laundry", "nice-to-have", "--source", "kijiji"]
+    common = [
+        "--non-interactive",
+        "--max-rent",
+        "3200",
+        "--beds",
+        "2",
+        "--laundry",
+        "nice-to-have",
+        "--source",
+        "kijiji",
+    ]
     bad = runner.invoke(cli.app, ["init", "--city", "unknown-city", *common])
     assert bad.exit_code == 2
     assert not (tmp_path / "profile.yaml").exists()
@@ -104,8 +142,9 @@ def test_toronto_kijiji_scope_and_unknown_city(
 
     def fetch(url: str) -> str:
         urls.append(url)
-        return ('<script type="application/ld+json">'
-                '{"@type":"ItemList","itemListElement":[]}</script>')
+        return (
+            '<script type="application/ld+json">{"@type":"ItemList","itemListElement":[]}</script>'
+        )
 
     assert list(KijijiSource(fetcher=fetch).discover(context)) == []
     assert urls == [
@@ -114,3 +153,66 @@ def test_toronto_kijiji_scope_and_unknown_city(
     assert cli._resolve_db_path(None) == tmp_path / "nostos.db"
     explicit = tmp_path / "custom.db"
     assert cli._resolve_db_path(explicit, profile_path=profile) == explicit
+
+
+def test_toronto_realtor_watch_is_visible_in_normal_ui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NOSTOS_HOME", str(tmp_path))
+    runner = CliRunner()
+    initialized = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--city",
+            "toronto",
+            "--max-rent",
+            "3600",
+            "--beds",
+            "2",
+            "--baths-min",
+            "1",
+            "--baths-max",
+            "2",
+            "--min-area",
+            "800",
+            "--laundry",
+            "deal-breaker",
+            "--parking",
+            "deal-breaker",
+            "--source",
+            "realtor_ca",
+        ],
+    )
+    assert initialized.exit_code == 0, initialized.output
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "realtor_ca"
+    search_html = (fixture_dir / "search_toronto.json").read_text(encoding="utf-8")
+    detail_html = (fixture_dir / "detail_30240799.html").read_text(encoding="utf-8")
+
+    def fetch(url: str) -> str:
+        return search_html if "/map#" in url else detail_html
+
+    monkeypatch.setitem(
+        cli.SOURCE_FACTORIES,
+        "realtor_ca",
+        lambda: RealtorCaSource(
+            fetcher=fetch,
+            now_provider=lambda: datetime(2026, 9, 6, 12, tzinfo=UTC),
+        ),
+    )
+    watched = runner.invoke(cli.app, ["watch", "--yes", "--source", "realtor_ca"])
+    assert watched.exit_code == 0, watched.output
+    assert "source=realtor_ca\tstatus=ok\tcount=1" in watched.output
+    listed = runner.invoke(cli.app, ["list"])
+    assert listed.exit_code == 0, listed.output
+    assert "585 BLOOR STREET E" in listed.output
+
+    profile = tmp_path / "profile.yaml"
+    db = tmp_path / "toronto" / "nostos.db"
+    pack = cli._resolve_citypack_path(None, profile_path=profile)
+    with TestClient(create_app(db_path=db, profile_path=profile, citypack_path=pack)) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert "585 BLOOR STREET E" in page.text
+        assert "realtor_ca" in page.text
