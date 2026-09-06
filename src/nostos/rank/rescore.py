@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 
 from nostos.config.profile import ScaledWeight
 from nostos.context import SearchContext
-from nostos.corrections import apply_user_corrections
+from nostos.corrections import apply_geo_observations, apply_user_corrections
 from nostos.enrich.base import Enricher
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import SourceRecord
@@ -89,6 +89,9 @@ def rescore_profile(
                         )
                     }
                 )
+            listing = apply_geo_observations(
+                conn, listing_id=record_row.listing_id, listing=listing
+            )
             listing = apply_user_corrections(
                 conn, listing_id=record_row.listing_id, listing=listing
             )

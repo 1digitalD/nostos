@@ -100,4 +100,40 @@ def load_user_corrections(
     return {listing_id: tuple(values) for listing_id, values in grouped.items()}
 
 
-__all__ = ["apply_user_corrections", "load_user_corrections"]
+def apply_geo_observations(
+    conn: sqlite3.Connection, *, listing_id: str, listing: Listing
+) -> Listing:
+    """Apply the latest provider-derived attributes used by ranking rules."""
+
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT field,value_json,confidence,evidence,observed_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY field ORDER BY observed_at DESC,id DESC
+                   ) AS rn
+            FROM observation
+            WHERE listing_id=? AND origin=?
+        )
+        SELECT field,value_json,confidence,evidence,observed_at FROM ranked WHERE rn=1
+        """,
+        (listing_id, Origin.GEO_PROVIDER.value),
+    ).fetchall()
+    if not rows:
+        return listing
+    attributes = dict(listing.attributes)
+    for row in rows:
+        field = str(row["field"])
+        if not field.startswith("attributes."):
+            continue
+        attributes[field.removeprefix("attributes.")] = Observed(
+            value=json.loads(str(row["value_json"])),
+            origin=Origin.GEO_PROVIDER,
+            confidence=float(row["confidence"]),
+            evidence=str(row["evidence"] or "map provider"),
+            observed_at=datetime.fromisoformat(str(row["observed_at"])),
+        )
+    return listing.model_copy(update={"attributes": attributes})
+
+
+__all__ = ["apply_geo_observations", "apply_user_corrections", "load_user_corrections"]

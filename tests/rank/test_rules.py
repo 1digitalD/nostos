@@ -195,6 +195,36 @@ def test_building_and_nearby_amenity_detectors_are_distinct() -> None:
     assert "grocery store" in (nearby_grocery.evidence or "")
 
 
+def test_measured_amenity_distance_controls_proximity_strength() -> None:
+    listing = _make_listing().model_copy(
+        update={
+            "attributes": {
+                "nearest_gym_km": Observed[float](
+                    value=0.3,
+                    origin=Origin.GEO_PROVIDER,
+                    confidence=0.9,
+                    evidence="OpenStreetMap gym",
+                    observed_at=OBSERVED_AT,
+                ),
+                "nearest_grocery_km": Observed[float](
+                    value=1.8,
+                    origin=Origin.GEO_PROVIDER,
+                    confidence=0.9,
+                    evidence="OpenStreetMap grocery",
+                    observed_at=OBSERVED_AT,
+                ),
+            }
+        }
+    )
+
+    gym = _detect("proximity.gym_nearby", listing)
+    grocery = _detect("proximity.grocery_nearby", listing)
+
+    assert gym is not None and gym.fired is True
+    assert gym.magnitude == pytest.approx(0.8)
+    assert grocery is not None and grocery.fired is False
+
+
 def test_walkable_phrase_detector_wins_when_both_phrase_types_exist() -> None:
     listing = _make_listing(
         description=(

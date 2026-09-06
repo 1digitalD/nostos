@@ -9,11 +9,11 @@ import pytest
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
-from nostos.model import SourceRecord
+from nostos.model import Origin, SourceRecord
 from nostos.rank.rescore import rescore_profile
 from nostos.sources.craigslist import CraigslistSource
 from nostos.store.db import apply_migrations, connect
-from nostos.store.repo import ListingRepo, ScoreRepo
+from nostos.store.repo import ListingRepo, ObservationRepo, ScoreRepo
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 PROFILE_ID = "profile"
@@ -135,6 +135,47 @@ def test_rescore_writes_scores_for_passing_listings_then_drops_them_when_filtere
         assert report.scored_count == 0
         assert report.skipped == 1
         assert ScoreRepo(conn).get_score(LISTING_ID, PROFILE_ID) is None
+
+
+def test_rescore_uses_saved_geo_provider_proximity(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    _seed_listing(db_path)
+    profile = Profile.model_validate(
+        {
+            "city": "vancouver",
+            "weights": {"proximity.gym_nearby": 5},
+            "sources": {"craigslist": "on"},
+            "schedule": "0 */6 * * *",
+        }
+    )
+    context = SearchContext(citypack=_citypack(), profile=profile)
+
+    with connect(db_path) as conn:
+        ObservationRepo(conn).record_observation(
+            listing_id=LISTING_ID,
+            field="attributes.nearest_gym_km",
+            value_json=0.3,
+            origin=Origin.GEO_PROVIDER,
+            confidence=0.9,
+            evidence="OpenStreetMap: nearby gym, 0.30 km from source map pin",
+            observed_at=NOW,
+        )
+        report = rescore_profile(
+            conn,
+            context=context,
+            profile_id=PROFILE_ID,
+            sources={"craigslist": CraigslistSource()},
+        )
+        stored = ScoreRepo(conn).get_score(LISTING_ID, PROFILE_ID)
+
+    assert report.scored_count == 1
+    assert stored is not None
+    contributions = stored.breakdown_json["contributions"]
+    assert isinstance(contributions, list)
+    contribution = contributions[0]
+    assert isinstance(contribution, dict)
+    assert contribution["rule_key"] == "proximity.gym_nearby"
+    assert contribution["contribution"] == pytest.approx(3.6)
 
 
 def test_rescore_skips_listings_whose_source_is_not_instantiated(tmp_path: Path) -> None:

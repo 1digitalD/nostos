@@ -22,7 +22,7 @@ from nostos.config.profile import Profile, ScaledWeight
 from nostos.config.wizard import dump_profile_yaml
 from nostos.context import SearchContext, load_search_context
 from nostos.enrich.location import directions_url, distance_km, walking_route
-from nostos.model import Observed
+from nostos.model import Observed, Origin
 from nostos.rank import rules as rules_module
 from nostos.rank.rescore import RescoreReport, rescore_profile
 from nostos.rank.rules import DEFAULT_REGISTRY
@@ -34,7 +34,7 @@ from nostos.sources import (
 from nostos.sources.manual import ManualSource
 from nostos.store.actions import ActionKind, ActionRepo
 from nostos.store.db import apply_migrations, connect
-from nostos.store.repo import ScoreRepo
+from nostos.store.repo import ObservationRepo, ScoreRepo
 from nostos.web.query import (
     SORT_OPTIONS,
     STATUS_FILTER_VALUES,
@@ -297,6 +297,57 @@ class AppState:
         conn = connect(self.db_path)
         apply_migrations(conn)
         return conn
+
+
+def _record_nearby_observations(
+    state: AppState, listing_id: str, result: Mapping[str, Any]
+) -> bool:
+    groups = result.get("groups")
+    if not isinstance(groups, Mapping):
+        return False
+    checked_at_raw = result.get("checked_at")
+    try:
+        checked_at = datetime.fromisoformat(str(checked_at_raw))
+    except ValueError:
+        checked_at = datetime.now(UTC)
+    field_groups = {
+        "attributes.nearest_gym_km": "gyms",
+        "attributes.nearest_grocery_km": "groceries",
+    }
+    changed = False
+    with state.connect() as conn, conn:
+        repo = ObservationRepo(conn)
+        for field_name, group_name in field_groups.items():
+            places = groups.get(group_name)
+            if not isinstance(places, list) or not places or not isinstance(places[0], Mapping):
+                continue
+            place = places[0]
+            try:
+                distance = float(place["distance_km"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            name = str(place.get("name") or group_name)
+            previous = conn.execute(
+                """
+                SELECT value_json FROM observation
+                WHERE listing_id=? AND field=? AND origin=?
+                ORDER BY observed_at DESC,id DESC LIMIT 1
+                """,
+                (listing_id, field_name, Origin.GEO_PROVIDER.value),
+            ).fetchone()
+            if previous is not None and float(json.loads(str(previous["value_json"]))) == distance:
+                continue
+            repo.record_observation(
+                listing_id=listing_id,
+                field=field_name,
+                value_json=distance,
+                origin=Origin.GEO_PROVIDER,
+                confidence=0.9,
+                evidence=f"OpenStreetMap: {name}, {distance:.2f} km from source map pin",
+                observed_at=checked_at,
+            )
+            changed = True
+    return changed
 
 
 
@@ -630,7 +681,7 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             },
         )
 
-    @app.get("/listings/{listing_id}/nearby.json", response_class=JSONResponse)
+    @app.post("/listings/{listing_id}/nearby.json", response_class=JSONResponse)
     def nearby_listing(listing_id: str, state: StateDep) -> JSONResponse:
         with state.connect() as conn:
             row = load_detail(
@@ -659,7 +710,10 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                     ),
                 }
             )
-        return JSONResponse(result)
+        changed = _record_nearby_observations(state, listing_id, result)
+        if changed:
+            state.rescore()
+        return JSONResponse({**result, "ranking_updated": changed})
 
     @app.get("/profile", response_class=HTMLResponse)
     def profile_view(

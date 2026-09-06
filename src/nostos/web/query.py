@@ -18,7 +18,11 @@ from typing import Literal
 
 import nostos.rank.rules as _rules
 from nostos.context import SearchContext
-from nostos.corrections import apply_user_corrections, load_user_corrections
+from nostos.corrections import (
+    apply_geo_observations,
+    apply_user_corrections,
+    load_user_corrections,
+)
 from nostos.enrich.chain import run_enricher_chain
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import Area, Listing, Money, Observed, Photo, SourceRecord
@@ -307,6 +311,7 @@ def _listing_from_record(
         listing = listing.model_copy(
             update={"identity": listing.identity.model_copy(update={"listing_id": listing_id})}
         )
+    listing = apply_geo_observations(conn, listing_id=listing_id, listing=listing)
     listing = apply_user_corrections(
         conn,
         listing_id=listing_id,

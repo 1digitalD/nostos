@@ -668,6 +668,17 @@ def _detect_building_gym(listing: Listing, _: RuleContext) -> Signal | None:
     ),
 )
 def _detect_nearby_gym(listing: Listing, _: RuleContext) -> Signal | None:
+    distance = _numeric_attribute(
+        listing, "attributes.nearest_gym_km", "nearest_gym_km"
+    )
+    if distance is not None:
+        km, confidence, evidence = distance
+        return Signal(
+            fired=km <= 1.5,
+            magnitude=max(0.0, 1 - km / 1.5),
+            confidence=confidence,
+            evidence=evidence or f"Nearest named gym is {km:.2f} km away",
+        )
     match = _NEARBY_GYM_RE.search(_combined_text(listing))
     return _signal_from_presence(match.group(0).strip()) if match else None
 
@@ -682,6 +693,17 @@ def _detect_nearby_gym(listing: Listing, _: RuleContext) -> Signal | None:
     ),
 )
 def _detect_nearby_grocery(listing: Listing, _: RuleContext) -> Signal | None:
+    distance = _numeric_attribute(
+        listing, "attributes.nearest_grocery_km", "nearest_grocery_km"
+    )
+    if distance is not None:
+        km, confidence, evidence = distance
+        return Signal(
+            fired=km <= 1.5,
+            magnitude=max(0.0, 1 - km / 1.5),
+            confidence=confidence,
+            evidence=evidence or f"Nearest named grocery store is {km:.2f} km away",
+        )
     match = _NEARBY_GROCERY_RE.search(_combined_text(listing))
     return _signal_from_presence(match.group(0).strip()) if match else None
 

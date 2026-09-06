@@ -75,7 +75,7 @@
   var status = section.querySelector('.nearby-status');
   var groups = section.querySelector('.nearby-groups');
   var labels = { gyms: 'Gyms', groceries: 'Groceries', parks: 'Parks', shopping: 'Shopping', services: 'Health services', transit: 'Transit' };
-  fetch(section.dataset.endpoint, { headers: { 'Accept': 'application/json' } })
+  fetch(section.dataset.endpoint, { method: 'POST', headers: { 'Accept': 'application/json' } })
     .then(function (response) { if (!response.ok) throw new Error('request failed'); return response.json(); })
     .then(function (data) {
       if (data.status !== 'ok') throw new Error(data.message || 'Nearby place data is unavailable.');
@@ -93,7 +93,9 @@
         groups.appendChild(card);
       });
       groups.hidden = false;
-      status.textContent = 'Nearby place scan complete. Distances are straight-line estimates from the source map pin.';
+      status.textContent = data.ranking_updated
+        ? 'Nearby place scan complete. Gym and grocery distances were added to the ranking.'
+        : 'Nearby place scan complete. Distances are straight-line estimates from the source map pin.';
     })
     .catch(function (error) { status.classList.add('is-error'); status.textContent = error.message || 'Nearby place data is temporarily unavailable. Use the map searches above.'; });
 })();
