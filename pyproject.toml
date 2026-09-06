@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.55.0"]
+floorplans = ["Pillow>=11.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/1digitalD/nostos"
@@ -40,13 +41,17 @@ nostos-mcp = "nostos.mcp.server:main"
 dev = [
   "httpx>=0.28.1",
   "mypy",
+  "Pillow>=11.0.0",
   "pytest",
   "ruff",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nostos"]
-include = ["src/nostos/citypacks/*.yaml"]
+include = [
+  "src/nostos/citypacks/*.yaml",
+  "src/nostos/enrich/*.swift",
+]
 
 [tool.mypy]
 python_version = "3.11"
@@ -54,7 +59,7 @@ strict = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["apprise", "extruct", "mcp", "mcp.*", "protego"]
+module = ["apprise", "extruct", "mcp", "mcp.*", "protego", "PIL", "PIL.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

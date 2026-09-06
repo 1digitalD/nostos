@@ -65,6 +65,7 @@ from nostos.web.research import (
     normalize_research_subject,
     research_cache_key,
 )
+from nostos.web.research_report import build_research_report
 from nostos.workflows import (
     CorrectionField,
     ManualListing,
@@ -440,6 +441,7 @@ def create_app(
     citypack_path: Path,
     research_provider: ResearchProvider | None = None,
     enable_detail_worker: bool = False,
+    floorplan_analyzer: Callable[[list[str], str | None], dict[str, Any]] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to a specific db/profile/citypack triple."""
 
@@ -494,6 +496,9 @@ def create_app(
     )
     app.state.nostos = state
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    research_lock = threading.Lock()
+    active_research: set[str] = set()
+    floorplan_lock = threading.Lock()
 
     @app.get("/switch-city/{city}")
     def switch_city(city: str, request: Request) -> RedirectResponse:
@@ -619,6 +624,14 @@ def create_app(
             }
             hunt_progress = progress(conn, listing_id)
             corrections = listing_corrections(conn, listing_id)
+            from nostos.enrich.floorplan import gallery_fingerprint, get_floorplan_state
+            floorplan = get_floorplan_state(conn, listing_id=listing_id)
+            photo_urls = [str(photo.url) for photo in row.photos]
+            floorplan_gallery_hash = gallery_fingerprint(photo_urls)
+            floorplan_stale = bool(
+                floorplan["analysis"]
+                and floorplan["analysis"]["gallery_hash"] != floorplan_gallery_hash
+            )
             landmark = state.context.profile.landmark
             landmark_context = None
             if landmark is not None:
@@ -651,6 +664,9 @@ def create_app(
                 "corrected": corrected,
                 "extracted": extracted,
                 "listing_evidence": _listing_evidence(row),
+                "floorplan": floorplan,
+                "floorplan_gallery_hash": floorplan_gallery_hash,
+                "floorplan_stale": floorplan_stale,
                 "landmark": landmark_context,
                 "breakdown": breakdown,
                 "breakdown_contributors": breakdown_contributors,
@@ -660,6 +676,81 @@ def create_app(
                 "profile_id": state.profile_id,
             },
         )
+
+    @app.post("/listings/{listing_id}/floor-plan", response_class=JSONResponse)
+    def analyze_floorplan(
+        listing_id: str, state: StateDep,
+        selected_url: Annotated[str, Form()] = "",
+    ) -> JSONResponse:
+        from nostos.enrich.floorplan import analyze_gallery, gallery_fingerprint, save_analysis
+
+        with state.connect() as conn:
+            row = load_detail(
+                conn, listing_id=listing_id, context=state.context,
+                profile_id=state.profile_id, sources=state.sources,
+            )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        urls = [str(photo.url) for photo in row.photos]
+        if selected_url and selected_url not in urls:
+            raise HTTPException(status_code=422, detail="Choose an image from this listing.")
+        if not floorplan_lock.acquire(blocking=False):
+            return JSONResponse(
+                {"message": "Another image scan is running. Retry shortly."}, status_code=429
+            )
+        try:
+            result = (
+                floorplan_analyzer(urls, selected_url or None) if floorplan_analyzer
+                else analyze_gallery(urls, selected_url=selected_url or None)
+            )
+            with state.connect() as conn:
+                current = load_detail(
+                    conn, listing_id=listing_id, context=state.context,
+                    profile_id=state.profile_id, sources=state.sources,
+                )
+                if current is None or gallery_fingerprint(
+                    [str(photo.url) for photo in current.photos]
+                ) != result["gallery_hash"]:
+                    return JSONResponse(
+                        {"message": "Listing images changed. Reload and scan the current gallery."},
+                        status_code=409,
+                    )
+                save_analysis(conn, listing_id=listing_id, result=result)
+            return JSONResponse({"reload": True, "status": result["status"]})
+        except (ValueError, RuntimeError) as exc:
+            return JSONResponse({"message": str(exc)}, status_code=422)
+        finally:
+            floorplan_lock.release()
+
+    @app.post("/listings/{listing_id}/floor-plan/decision")
+    def floorplan_decision(
+        listing_id: str, state: StateDep,
+        gallery_hash: Annotated[str, Form(...)],
+        selected_source_hash: Annotated[str, Form(...)],
+        decision: Annotated[str, Form(...)],
+        note: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        from nostos.enrich.floorplan import gallery_fingerprint, set_floorplan_decision
+
+        with state.connect() as conn:
+            row = load_detail(
+                conn, listing_id=listing_id, context=state.context,
+                profile_id=state.profile_id, sources=state.sources,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            if gallery_fingerprint([str(photo.url) for photo in row.photos]) != gallery_hash:
+                raise HTTPException(
+                    status_code=409, detail="Images changed. Reload and scan again."
+                )
+            try:
+                set_floorplan_decision(
+                    conn, listing_id=listing_id, gallery_hash=gallery_hash,
+                    selected_source_hash=selected_source_hash, decision=decision, note=note,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(url=f"/listings/{listing_id}#floor-plan", status_code=303)
 
     @app.post("/listings/{listing_id}/detail-refresh", response_class=JSONResponse)
     def detail_refresh(listing_id: str, state: StateDep) -> JSONResponse:
@@ -826,11 +917,35 @@ def create_app(
                 "FROM source_record GROUP BY source ORDER BY source"
             ).fetchall()
             web_research_run, web_research_results = ResearchRepo(conn).get(listing_id)
+            excluded_sources = {
+                (str(item["cache_key"]), str(item["url"]))
+                for item in conn.execute(
+                    "SELECT cache_key,url FROM research_source_feedback WHERE listing_id=?",
+                    (listing_id,),
+                )
+            }
         city = state.context.profile.city
         subject = _research_identity(row, city)
         cache_current = _research_cache_current(web_research_run, subject, city)
         if not cache_current:
             web_research_run, web_research_results = None, []
+        report = None
+        excluded_urls: set[str] = set()
+        if subject and web_research_run:
+            key = research_cache_key(subject, city)
+            excluded_urls = {url for cache_key, url in excluded_sources if cache_key == key}
+            report = build_research_report(
+                subject, city,
+                [item for item in web_research_results if item["url"] not in excluded_urls],
+                fetched_at=str(web_research_run["fetched_at"]),
+                filtered_stale_count=int(str(web_research_run.get("filtered_stale_count", 0))),
+                filtered_irrelevant_count=int(
+                    str(web_research_run.get("filtered_irrelevant_count", 0))
+                ),
+                partial_errors=(
+                    [str(web_research_run["error"])] if web_research_run.get("error") else []
+                ),
+            )
         return state.templates.TemplateResponse(
             request=request,
             name="research.html",
@@ -850,10 +965,46 @@ def create_app(
                 "missing_facts": _missing_research_facts(row),
                 "web_research_run": web_research_run,
                 "web_research_results": web_research_results,
+                "compiled_report": report,
+                "excluded_research_urls": excluded_urls,
                 "web_research_auto_start": subject is not None and not cache_current,
                 "profile_id": state.profile_id,
             },
         )
+
+    @app.post("/listings/{listing_id}/research-source")
+    def research_source_feedback(
+        listing_id: str, state: StateDep, url: Annotated[str, Form(...)],
+        cache_key: Annotated[str, Form(...)], excluded: Annotated[bool, Form(...)],
+    ) -> RedirectResponse:
+        with state.connect() as conn:
+            row = load_detail(
+                conn, listing_id=listing_id, context=state.context,
+                profile_id=state.profile_id, sources=state.sources,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Listing not found")
+            subject = _research_identity(row, state.context.profile.city)
+            if not subject or cache_key != research_cache_key(subject, state.context.profile.city):
+                raise HTTPException(status_code=409, detail="Address changed. Reload the report.")
+            run, results = ResearchRepo(conn).get(listing_id)
+            if not run or run.get("cache_key") != cache_key or not any(
+                item["url"] == url for item in results
+            ):
+                raise HTTPException(status_code=409, detail="Sources changed. Reload the report.")
+            if excluded:
+                conn.execute(
+                    "INSERT OR REPLACE INTO research_source_feedback VALUES (?,?,?,?)",
+                    (listing_id, cache_key, url, datetime.now(UTC).isoformat()),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM research_source_feedback "
+                    "WHERE listing_id=? AND cache_key=? AND url=?",
+                    (listing_id, cache_key, url),
+                )
+            conn.commit()
+        return RedirectResponse(url=f"/listings/{listing_id}/research", status_code=303)
 
     @app.post("/listings/{listing_id}/web-research.json", response_class=JSONResponse)
     def web_research_listing(
@@ -884,6 +1035,14 @@ def create_app(
             return JSONResponse(
                 {"status": "cached", "count": len(cached_results), "reload": False}
             )
+        with research_lock:
+            if listing_id in active_research or len(active_research) >= 2:
+                return JSONResponse(
+                    {"status": "busy", "reload": False,
+                     "message": "Research is already running. Retry shortly to read the report."},
+                    status_code=429,
+                )
+            active_research.add(listing_id)
         try:
             compiled = compile_web_research(
                 subject,
@@ -895,6 +1054,9 @@ def create_app(
                 {"status": "error", "message": str(exc), "reload": False},
                 status_code=502,
             )
+        finally:
+            with research_lock:
+                active_research.discard(listing_id)
         results = compiled["results"]
         if not isinstance(results, list):
             results = []

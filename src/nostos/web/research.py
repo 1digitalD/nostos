@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import httpx
+
+from nostos.web.research_report import build_research_report
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _RADIUS_METRES = 1500
@@ -440,25 +443,38 @@ def compile_web_research(
             f'"{normalized_subject}" "{normalized_city}" property management building reviews',
         ),
         (
+            "Amenities and services",
+            f'"{normalized_subject}" "{normalized_city}" amenities grocery gym park transit',
+        ),
+        (
             "Safety",
             f'"{normalized_subject}" "{normalized_city}" safety incidents fire police',
         ),
     )
     raw_batches: list[list[dict[str, Any]]] = []
     partial_errors: list[str] = []
-    for label, query in searches:
-        try:
-            batch = active_provider.search(
-                query,
-                limit=_SEARCH_RESULT_LIMIT,
-                date_after=cutoff.isoformat(),
-                date_before=now.date().isoformat(),
+    with ThreadPoolExecutor(max_workers=min(3, len(searches))) as executor:
+        pending = [
+            (
+                label,
+                executor.submit(
+                    active_provider.search,
+                    query,
+                    limit=_SEARCH_RESULT_LIMIT,
+                    date_after=cutoff.isoformat(),
+                    date_before=now.date().isoformat(),
+                ),
             )
-            if not isinstance(batch, list):
-                raise RuntimeError("the provider returned an invalid result list")
-            raw_batches.append(batch[:_SEARCH_RESULT_LIMIT])
-        except Exception as exc:
-            partial_errors.append(_search_error(label, exc))
+            for label, query in searches
+        ]
+        for label, future in pending:
+            try:
+                batch = future.result()
+                if not isinstance(batch, list):
+                    raise RuntimeError("the provider returned an invalid result list")
+                raw_batches.append(batch[:_SEARCH_RESULT_LIMIT])
+            except Exception as exc:
+                partial_errors.append(_search_error(label, exc))
     if not raw_batches:
         raise RuntimeError("The research provider failed for all focused searches.")
 
@@ -515,12 +531,23 @@ def compile_web_research(
         )
         if len(results) >= _MAX_ACCEPTED_RESULTS:
             break
+    fetched_at = now.isoformat()
+    report = build_research_report(
+        normalized_subject,
+        normalized_city,
+        cast(list[dict[str, Any]], results),
+        fetched_at=fetched_at,
+        filtered_stale_count=filtered_stale,
+        filtered_irrelevant_count=filtered_irrelevant,
+        partial_errors=partial_errors,
+    )
     return {
         "provider": active_provider.name,
-        "fetched_at": now.isoformat(),
+        "fetched_at": fetched_at,
         "filtered_stale_count": filtered_stale,
         "filtered_irrelevant_count": filtered_irrelevant,
         "partial_errors": partial_errors,
         "subject": normalized_subject,
         "results": results,
+        "report": report,
     }

@@ -88,16 +88,20 @@ class _ResearchProvider:
         results: list[dict[str, Any]],
         *,
         failure_indexes: set[int] | None = None,
+        failure_query_terms: set[str] | None = None,
         failure_message: str = "search failed",
     ) -> None:
         self.results = results
         self.failure_indexes = failure_indexes or set()
+        self.failure_query_terms = failure_query_terms or set()
         self.failure_message = failure_message
         self.calls: list[dict[str, object]] = []
 
     def search(self, query: str, **kwargs: object) -> list[dict[str, Any]]:
         self.calls.append({"query": query, **kwargs})
-        if len(self.calls) - 1 in self.failure_indexes:
+        if len(self.calls) - 1 in self.failure_indexes or any(
+            term in query for term in self.failure_query_terms
+        ):
             raise RuntimeError(self.failure_message)
         return self.results
 
@@ -142,7 +146,7 @@ def test_perplexity_provider_uses_direct_structured_search_api(monkeypatch: Any)
     assert captured["json"]["search_before_date_filter"] == "9/6/2026"
 
 
-def test_compile_web_research_runs_three_bounded_targeted_searches_with_dynamic_dates() -> None:
+def test_compile_web_research_runs_four_bounded_targeted_searches_with_dynamic_dates() -> None:
     today = datetime.now(UTC).date()
     provider = _ResearchProvider(
         [
@@ -157,8 +161,8 @@ def test_compile_web_research_runs_three_bounded_targeted_searches_with_dynamic_
     result = research.compile_web_research("55 Bremner Blvd", "Toronto", provider=provider)
 
     queries = [str(call["query"]) for call in provider.calls]
-    assert len(queries) == 3
-    assert len(set(queries)) == 3
+    assert len(queries) == 4
+    assert len(set(queries)) == 4
     normalized = research.normalize_research_subject("55 Bremner Blvd", "Toronto")
     assert normalized is not None
     assert all(f'"{normalized}"' in query for query in queries)
@@ -168,6 +172,9 @@ def test_compile_web_research_runs_three_bounded_targeted_searches_with_dynamic_
     query_text = " ".join(queries).casefold()
     assert "management" in query_text
     assert "review" in query_text
+    assert "grocery" in query_text
+    assert "gym" in query_text
+    assert "park" in query_text
     assert "safety" in query_text
     limits = [call["limit"] for call in provider.calls]
     assert all(isinstance(limit, int) and 0 < limit <= 10 for limit in limits)
@@ -354,13 +361,13 @@ def test_compile_web_research_reports_partial_provider_failure() -> None:
                 published=today,
             )
         ],
-        failure_indexes={1},
+        failure_query_terms={"property management"},
         failure_message="reviews unavailable; api_token=SECRET-123",
     )
 
     result = research.compile_web_research("55 Bremner Blvd", "Toronto", provider=provider)
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 4
     assert result["results"]
     assert len(result["partial_errors"]) == 1
     assert "Management and reviews" in str(result["partial_errors"][0])
@@ -369,12 +376,12 @@ def test_compile_web_research_reports_partial_provider_failure() -> None:
 
 def test_compile_web_research_reports_all_provider_failures() -> None:
     provider = _ResearchProvider(
-        [], failure_indexes={0, 1, 2}, failure_message="provider unavailable"
+        [], failure_indexes={0, 1, 2, 3}, failure_message="provider unavailable"
     )
 
     with pytest.raises(RuntimeError, match="all focused searches"):
         research.compile_web_research("55 Bremner Blvd", "Toronto", provider=provider)
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 4
 
 
 def test_research_cache_key_uses_normalized_address_and_city() -> None:

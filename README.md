@@ -206,3 +206,25 @@ protocol, the fixture and conformance requirements, and the checks every PR must
 ## License
 
 Apache-2.0.
+
+### Building reports and floor plans
+
+Open **Research** from a listing to compile a dated, cited report organized by
+building, management, services, groceries, gyms, parks and safety. Reports use the
+configured search provider and deterministic extraction: no synthesis-model token
+cost or agent-host dependency. Sources are limited to the recent two-year window;
+search excerpts are not full-page verification. Missing evidence remains explicit.
+Use **Exclude incorrect source** or **Restore source** in the source review section;
+these choices persist for that address and do not alter listing facts or rankings.
+
+On the listing page, **Scan photos for a floor plan** checks up to eight saved images.
+You can choose a particular image beyond that first batch. Read the original beside
+printed dimensions and area, then confirm/reject the image and save your own reading.
+This never silently writes room sizes, total area or ranking facts. A plan image can
+be generic or belong to another unit; confirming the image does not certify OCR.
+
+Install image support with `pip install '.[floorplans]'`. OCR stays local: Nostos uses
+Tesseract if it is on PATH, otherwise macOS Vision through Swift on macOS. Other hosts
+without Tesseract show an unavailable state; install Tesseract using the host package
+manager. Failed scans retain earlier usable evidence. There is no historical bulk
+image scan, inferred geometry/layout score, or hosted vision-model requirement.

@@ -1,0 +1,61 @@
+<section class="detail-section" id="floor-plan" data-endpoint="/listings/{{ row.listing_id }}/floor-plan">
+  <div class="section-heading"><div><h2>Floor plan</h2><p>Find a plan in the saved photos and read its printed measurements. Image readings stay separate from listing facts.</p></div></div>
+  {% if row.photos %}
+    <form class="floorplan-scan" method="post" action="/listings/{{ row.listing_id }}/floor-plan"><button class="btn btn-secondary" type="submit">Scan photos for a floor plan</button></form>
+    <p class="floorplan-status" role="status" aria-live="polite">Scans up to eight saved images locally. You can also choose any image below.</p>
+  {% else %}<p>No saved images to analyse. Use Update listing details to check for photos.</p>{% endif %}
+  {% if floorplan_stale %}<p class="research-caution">The listing gallery changed. Scan again before relying on this earlier analysis.</p>{% endif %}
+  {% if floorplan.analysis %}
+    {% set analysis = floorplan.analysis %}
+    {% if analysis.latest_outcome %}<p class="research-caution">The latest scan could not produce usable readings. Earlier evidence is shown below.</p>{% for photo in analysis.latest_outcome.photos %}{% for limitation in photo.limitations %}<p class="report-gap">{{ limitation }}</p>{% endfor %}{% endfor %}{% endif %}
+    <p>{{ analysis.analyzed_count }} image{% if analysis.analyzed_count != 1 %}s{% endif %} checked · {{ analysis.candidate_count }} possible floor plan{% if analysis.candidate_count != 1 %}s{% endif %}.</p>
+    {% for limitation in analysis.limitations %}<p class="report-gap">{{ limitation }}</p>{% endfor %}
+    {% if floorplan.decision and (floorplan.decision.gallery_changed or floorplan.decision.selection_changed) %}<p class="research-caution">Your earlier plan selection needs checking against the current images.</p>{% if floorplan.decision.note %}<p>Your earlier reading: {{ floorplan.decision.note }}</p>{% endif %}{% endif %}
+    {% for photo in analysis.photos %}
+      {% set selected = floorplan.decision and floorplan.decision.selected_source_hash == photo.source_hash %}
+      {% set expanded = photo.candidate or selected or analysis.photos|length == 1 %}
+      {% if expanded %}<article class="plan-result">{% else %}<details class="plan-result"><summary>Photo {{ loop.index }} · {{ 'Could not read image' if photo.status in ['unavailable', 'error'] else 'No plan detected' }}</summary>{% endif %}
+        <h3>{{ 'Possible floor plan' if photo.candidate else ('Image could not be read' if photo.status in ['unavailable', 'error'] else 'No floor plan detected') }}</h3>
+        <a href="{{ photo.url }}" target="_blank" rel="noopener noreferrer"><img class="plan-original" src="{{ photo.url }}" alt="Original listing image used for floor-plan analysis" loading="lazy"></a>
+        {% if photo.measurements %}
+          <h4>Printed measurements — check the image</h4>
+          <ul>{% for measurement in photo.measurements %}<li>{{ measurement.label }}: {{ measurement.raw_text }}</li>{% endfor %}</ul>
+        {% elif photo.candidate %}<p>No readable labelled measurements were found. This does not establish the unit's area.</p>{% endif %}
+        {% for limitation in photo.limitations %}<p class="report-gap">{{ limitation }}</p>{% endfor %}
+        {% if photo.lines %}<details class="source-description"><summary>Read detected text</summary><p>{% for line in photo.lines %}{{ line.text }}<br>{% endfor %}</p></details>{% endif %}
+        {% if photo.source_hash and not floorplan_stale %}
+          {% set selected = floorplan.decision and floorplan.decision.selected_source_hash == photo.source_hash %}
+          {% if selected and not floorplan.decision.gallery_changed and not floorplan.decision.selection_changed %}<p class="plan-decision">{{ 'You confirmed this image as the unit’s plan.' if floorplan.decision.decision == 'confirmed' else 'You marked this image as not the unit’s plan.' }} Measurements remain unverified OCR readings.</p>{% endif %}
+          <form class="compact-form" method="post" action="/listings/{{ row.listing_id }}/floor-plan/decision">
+            <input type="hidden" name="gallery_hash" value="{{ analysis.gallery_hash }}">
+            <input type="hidden" name="selected_source_hash" value="{{ photo.source_hash }}">
+            <label for="plan-note-{{ loop.index }}">Your reading or corrections</label>
+            <textarea id="plan-note-{{ loop.index }}" name="note" maxlength="2000" rows="2" placeholder="For example: the bedroom label reads 10 ft × 12 ft.">{{ floorplan.decision.note if selected else '' }}</textarea>
+            <div class="inline-actions"><button class="btn btn-secondary" name="decision" value="confirmed" type="submit">This is the unit's plan</button><button class="btn btn-secondary" name="decision" value="rejected" type="submit">Not the unit's plan</button></div>
+          </form>
+        {% endif %}
+      {% if expanded %}</article>{% else %}</details>{% endif %}
+    {% endfor %}
+  {% endif %}
+  {% if row.photos %}<details class="source-description"><summary>Choose a specific image to analyse ({{ row.photos|length }} photo{{ 's' if row.photos|length != 1 else '' }})</summary><div class="plan-chooser">
+    {% for photo in row.photos %}<form class="floorplan-scan" method="post" action="/listings/{{ row.listing_id }}/floor-plan"><img src="{{ photo.url }}" alt="Listing photo {{ loop.index }}" loading="lazy"><input type="hidden" name="selected_url" value="{{ photo.url }}"><button class="btn btn-secondary" type="submit">Analyse photo {{ loop.index }}</button></form>{% endfor %}
+  </div></details>{% endif %}
+</section>
+<script>
+(function () {
+  var panel = document.getElementById('floor-plan');
+  if (!panel) return;
+  panel.querySelectorAll('.floorplan-scan').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var status = panel.querySelector('.floorplan-status');
+      panel.querySelectorAll('.floorplan-scan button').forEach(function (button) { button.disabled = true; });
+      status.textContent = 'Reading saved images locally… This may take about a minute.';
+      fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'Accept': 'application/json' } })
+        .then(function (response) { return response.json().then(function (data) { if (!response.ok) throw new Error(data.message || data.detail || 'Image analysis failed.'); return data; }); })
+        .then(function () { window.location.hash = 'floor-plan'; window.location.reload(); })
+        .catch(function (error) { status.textContent = error.message + ' Your earlier results are retained. Retry or choose another image.'; panel.querySelectorAll('.floorplan-scan button').forEach(function (button) { button.disabled = false; }); });
+    });
+  });
+})();
+</script>

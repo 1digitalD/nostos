@@ -131,14 +131,15 @@ def test_listing_correction_and_research_workflow(
     research = client.get(f"/listings/{first}/research")
     assert research.status_code == 200
     assert "Possible matching advertisements" in research.text
-    assert "Building evidence" in research.text
+    assert "Building report" in research.text
     assert "0</strong><span>matching source excerpts" in research.text
     assert second in research.text
     assert "unit-b" in research.text
-    assert "Address research" in research.text
+    assert "Continue your investigation" in research.text
     assert "Time-sensitive web searches are limited to the past year" in research.text
     assert "Nearby places" in research.text
-    address_research = research.text.split("Address research", 1)[1].split("Nearby places", 1)[0]
+    address_research = research.text.split("Continue your investigation", 1)[1]
+    address_research = address_research.split("Nearby places", 1)[0]
     assert "2450" not in address_research
 
     calls = 0

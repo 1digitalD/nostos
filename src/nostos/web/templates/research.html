@@ -32,24 +32,57 @@
     <main class="research-main">
       <section class="detail-section compiled-research" id="compiled-research" data-endpoint="/listings/{{ row.listing_id }}/web-research.json" data-auto="{{ 1 if web_research_auto_start else 0 }}">
         <div class="section-heading">
-          <div><h2>Building evidence</h2><p>Recent source excerpts checked for a matching street address and city. These are source claims, not independently verified conclusions. Ads for other units may describe the building; their rent, layout and availability do not apply to your unit.</p></div>
+          <div><h2>Building report</h2><p>Findings from recent sources checked for a matching street address and city. Read the evidence and open questions before relying on a claim. Other advertisements never establish your unit’s rent, layout or availability.</p></div>
           <button type="button" class="btn btn-secondary" data-refresh-research {% if not research_subject_precise %}disabled{% endif %}>Refresh research</button>
         </div>
         <p class="compiled-status" role="status" aria-live="polite">
           {% if not research_subject_precise %}Enter an exact street address above to start building research.{% elif web_research_auto_start %}Checking recent sources against this address…{% elif web_research_results %}Address checks completed on {{ web_research_run.fetched_at[:10] }}.{% else %}No recent source excerpts could be tied to this address. Building conditions and safety remain unknown.{% endif %}
         </p>
+        {% if compiled_report %}
+          <p class="report-scope">{{ compiled_report.scope_note }}</p>
+          {% for conflict in compiled_report.conflicts %}<p class="research-caution">{{ conflict.summary }}</p>{% endfor %}
+          <nav class="report-contents" aria-label="Report sections">{% for section in compiled_report.sections %}<a href="#report-{{ section.key }}">{{ section.title }}</a>{% endfor %}</nav>
+          {% for section in compiled_report.sections %}
+          <section class="report-section" id="report-{{ section.key }}">
+            <h3>{{ section.title }}</h3>
+            {% for claim in section.claims %}
+              <div class="report-claim">
+                <p>{{ claim.text }}</p>
+                <p class="report-attribution">{{ 'Nearby context' if claim.scope == 'nearby' else ('Other unit — verify applicability' if claim.scope == 'other_unit' else 'Building source claim') }} · {{ 'Conflicting evidence' if claim.status == 'conflicting' else 'Reported, not independently verified' }} · {{ claim.published_at }}
+                  {% for citation_id in claim.citation_ids %}<a href="#citation-{{ citation_id }}">[{{ citation_id }}]</a>{% endfor %}
+                </p>
+              </div>
+            {% endfor %}
+            {% for gap in section.gaps %}<p class="report-gap">{{ gap }}</p>{% endfor %}
+            {% if section.questions %}<details class="fact-evidence"><summary>Questions to verify</summary><ul>{% for question in section.questions %}<li>{{ question }}</li>{% endfor %}</ul></details>{% endif %}
+          </section>
+          {% endfor %}
+          {% if compiled_report.uncertainties %}<details class="source-description"><summary>Coverage and limitations</summary><ul>{% for item in compiled_report.uncertainties %}<li>{{ item }}</li>{% endfor %}</ul></details>{% endif %}
+          <details class="source-description report-citations"><summary>Read cited evidence</summary>
+          {% for citation in compiled_report.citations %}<article id="citation-{{ citation.id }}"><h3>[{{ citation.id }}] <a href="{{ citation.url }}" target="_blank" rel="noopener noreferrer">{{ citation.title }}</a></h3><p>{{ citation.excerpt }}</p><p>{{ citation.source }} · Published <time datetime="{{ citation.published_at }}">{{ citation.published_at }}</time> · Retrieved {{ web_research_run.fetched_at[:10] }}</p></article>{% endfor %}
+          </details>
+        {% endif %}
         {% if web_research_results %}
+          <details class="source-description"><summary>Review sources or exclude an incorrect match</summary>
           <div class="compiled-findings">
             {% for item in web_research_results %}
               <article class="compiled-finding">
                 <div><span class="finding-topic">{{ item.topic }}</span><span>{{ item.source }}</span><time datetime="{{ item.published_at }}">{{ item.published_at }}</time></div>
                 <h3><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a></h3>
                 <p>{{ item.excerpt }}</p>
+                {% if item.url in excluded_research_urls %}<p>Excluded from your report.</p>{% endif %}
+                <form method="post" action="/listings/{{ row.listing_id }}/research-source">
+                  <input type="hidden" name="url" value="{{ item.url }}">
+                  <input type="hidden" name="cache_key" value="{{ web_research_run.cache_key }}">
+                  <input type="hidden" name="excluded" value="{{ 'false' if item.url in excluded_research_urls else 'true' }}">
+                  <button class="btn btn-secondary" type="submit">{{ 'Restore source' if item.url in excluded_research_urls else 'Exclude incorrect source' }}</button>
+                </form>
                 <p class="research-filter-note">{{ item.match_reason }}</p>
                 <a class="text-link" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">View cited source ↗</a>
               </article>
             {% endfor %}
           </div>
+          </details>
           {% if web_research_run.filtered_stale_count %}<p class="research-filter-note">{{ web_research_run.filtered_stale_count }} undated, future-dated, or older-than-two-year result{% if web_research_run.filtered_stale_count != 1 %}s were{% else %} was{% endif %} excluded.</p>{% endif %}
         {% endif %}
         {% if web_research_run %}
@@ -59,7 +92,7 @@
       </section>
 
       <section class="detail-section">
-        <div class="section-heading"><div><h2>Address research</h2><p>Searches begin with the address only. Time-sensitive web searches are limited to the past year.</p></div></div>
+        <div class="section-heading"><div><h2>Continue your investigation</h2><p>Searches begin with the address only. Time-sensitive web searches are limited to the past year.</p></div></div>
         {% if not research_subject_precise %}
           <div class="research-caution" role="note"><strong>The listing does not expose a precise street address.</strong><span>Building searches are paused until you enter the address above.</span></div>
         {% endif %}
@@ -128,6 +161,12 @@
     if (compiled.dataset.auto === '1') runCompiledResearch(false);
   }
 
+  document.querySelectorAll('a[href^="#citation-"]').forEach(function (link) {
+    link.addEventListener('click', function () {
+      var evidence = document.querySelector('.report-citations');
+      if (evidence) evidence.open = true;
+    });
+  });
   var section = document.getElementById('nearby-places');
   if (!section) return;
   var status = section.querySelector('.nearby-status');

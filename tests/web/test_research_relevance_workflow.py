@@ -57,7 +57,7 @@ def test_real_compilation_persistence_cache_and_correction(tmp_path: Path) -> No
     compiled = client.post(endpoint)
     assert compiled.status_code == 200, compiled.text
     assert compiled.json()["count"] == 1
-    assert provider.calls == 3
+    assert provider.calls == 4
     page = client.get(page_url)
     assert "1234 West 4th Ave, Vancouver building" in page.text
     assert "Irrelevant Montreal apartment" not in page.text
@@ -67,7 +67,7 @@ def test_real_compilation_persistence_cache_and_correction(tmp_path: Path) -> No
         assert run and run["cache_key"] and run["filtered_irrelevant_count"]
         assert results[0]["match_reason"]
     assert client.post(endpoint).json()["status"] == "cached"
-    assert provider.calls == 3
+    assert provider.calls == 4
     changed = client.post(
         "/listings/craigslist:test/research-address",
         data={"address": "999 Other Street, Vancouver"},
@@ -75,7 +75,7 @@ def test_real_compilation_persistence_cache_and_correction(tmp_path: Path) -> No
     assert changed.status_code == 200
     assert "1234 West 4th Ave, Vancouver building" not in changed.text
     assert client.post(endpoint).json()["count"] == 0
-    assert provider.calls == 6
+    assert provider.calls == 8
     assert "remain unknown" in client.get(page_url).text
 
 

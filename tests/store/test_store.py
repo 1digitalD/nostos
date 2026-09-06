@@ -17,7 +17,7 @@ def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None
     db_path = tmp_path / "nostos.db"
     with connect(db_path) as conn:
         applied = apply_migrations(conn)
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         assert apply_migrations(conn) == []
 
         table_names = {
@@ -39,6 +39,9 @@ def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None
         "listing_action",
         "research_run",
         "research_result",
+        "research_source_feedback",
+        "floorplan_analysis",
+        "floorplan_decision",
     }.issubset(table_names)
 
 

@@ -80,6 +80,8 @@
         </dl>
       </section>
 
+      {% include "_floorplan.html" %}
+
       <section class="detail-section extraction-section">
         <div class="section-heading"><div><h2>Check extracted details</h2><p>Review what can be recovered from the saved listing text before applying changes.</p></div></div>
         <div class="extraction-actions">{% if row.source != 'manual' %}<button type="button" class="btn btn-primary" id="refresh-details" data-listing="{{ row.listing_id }}">Update listing details</button>{% endif %}<a class="btn btn-secondary" href="/listings/{{ row.listing_id }}/extraction-review">Review extracted details</a></div>
