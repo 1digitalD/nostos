@@ -640,6 +640,17 @@ def test_card_shows_score_badge_and_top_contributors(tmp_path: Path) -> None:
     # remains available on the listing page.
 
 
+def test_card_keeps_stored_score_when_extraction_needs_refresh(tmp_path: Path) -> None:
+    client, db_path, profile_id = _client(tmp_path)
+    _seed_listing(db_path, profile_id, "craigslist:seed-1", score=54.7)
+
+    body = client.get("/").text
+
+    assert '<span class="score score-mid">54.7</span>' in body
+    assert "Needs refresh" in body
+    assert "Needs review" not in body
+
+
 def test_detail_renders_rule_table_and_reasons(tmp_path: Path) -> None:
     client, db_path, profile_id = _client(tmp_path, hard={
         "rent": {"max": 3200, "currency": "CAD"},

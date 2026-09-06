@@ -189,7 +189,10 @@
           {% endif %}
           <div class="card-overlay">
             <span class="card-overlay-spacer"></span>
-            {% if row.extraction_current %}<span class="card-score" title="Match score (0–100)">{{ row.score | score_badge | safe }}</span>{% else %}<span class="card-score" title="Review extracted details to update ranking">Needs review</span>{% endif %}
+            <span class="card-score-stack">
+              <span class="card-score" title="Match score (0–100)">{{ row.score | score_badge | safe }}</span>
+              {% if not row.extraction_current %}<span class="card-score-freshness" title="The score uses an earlier extraction. Open the listing to refresh its details.">Needs refresh</span>{% endif %}
+            </span>
           </div>
         </a>
 
