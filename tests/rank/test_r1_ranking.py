@@ -177,11 +177,59 @@ def test_parking_detector_fires_for_positive_text_without_negation_false_positiv
 
     negated = _make_listing(description="No parking available for this unit.")
     negated_signal = _detect("parking.available", negated)
-    assert negated_signal is None
+    assert negated_signal is not None
+    assert negated_signal.fired is True
+    assert negated_signal.magnitude == 0.0
+    assert negated_signal.evidence == "No parking"
 
     missing = _make_listing()
     missing_signal = _detect("parking.available", missing)
     assert missing_signal is None
+
+
+def test_parking_detector_accepts_paid_availability_but_not_generic_mentions() -> None:
+    paid = _make_listing(description="Parking available for an extra $150 per month.")
+    paid_signal = _detect("parking.available", paid)
+    assert paid_signal is not None
+    assert paid_signal.fired is True
+
+    generic = _make_listing(description="The garage has secure bicycle storage.")
+    assert _detect("parking.available", generic) is None
+
+
+def test_parking_detector_treats_no_dedicated_parking_as_an_explicit_miss() -> None:
+    listing = _make_listing(
+        description="No dedicated parking included; street parking may be available."
+    )
+
+    signal = _detect("parking.available", listing)
+
+    assert signal is not None
+    assert signal.fired is True
+    assert signal.magnitude == 0.0
+
+
+def test_laundry_detector_requires_private_unit_scope() -> None:
+    assert (
+        _detect("laundry.in_suite", _make_listing(description="No shared laundry.")) is None
+    )
+    assert (
+        _detect("laundry.in_suite", _make_listing(description="Washer and dryer hookups."))
+        is None
+    )
+
+    explicit = _detect(
+        "laundry.in_suite",
+        _make_listing(description="Private in-suite laundry; no shared laundry."),
+    )
+    assert explicit is not None
+    assert explicit.fired is True
+
+
+def test_floor_detector_ignores_bedroom_count_after_top_floor_label() -> None:
+    listing = _make_listing(title="TOP-FLOOR 2-BEDROOM")
+
+    assert _detect("floor.low", listing) is None
 
 
 def test_pets_detector_distinguishes_friendly_conditional_and_no_pets() -> None:

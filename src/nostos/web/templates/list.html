@@ -189,7 +189,7 @@
           {% endif %}
           <div class="card-overlay">
             <span class="card-overlay-spacer"></span>
-            <span class="card-score" title="Match score (0–100)">{{ row.score | score_badge | safe }}</span>
+            {% if row.extraction_current %}<span class="card-score" title="Match score (0–100)">{{ row.score | score_badge | safe }}</span>{% else %}<span class="card-score" title="Review extracted details to update ranking">Needs review</span>{% endif %}
           </div>
         </a>
 

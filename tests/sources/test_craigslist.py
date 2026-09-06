@@ -13,11 +13,13 @@ import pytest
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext, SourceScanState
+from nostos.enrich.text import recover_missing_attributes
 from nostos.model import Absence, Area, Money, Observed, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import (
     CraigslistRobotsBlockedError,
     CraigslistSource,
+    _parse_detail_html,
     cl_posted_iso,
     parse_cl_rss,
 )
@@ -109,11 +111,11 @@ def test_to_listing_is_pure_and_uses_fixture_payloads() -> None:
     assert isinstance(listing.area, Observed)
     assert listing.area.value == Area(value=1000.0, unit="sqft")
     assert isinstance(listing.parking, Observed)
-    assert listing.parking.value == "Included"
+    assert listing.parking.value == "Available"
     assert isinstance(listing.furnishing, Observed)
     assert listing.furnishing.value == "Unfurnished"
     assert listing.floor == Absence.NOT_STATED
-    assert len(listing.photos) == 1
+    assert len(listing.photos) == 8
     assert listing.photos[0].url.endswith(".jpg")
 
 
@@ -142,6 +144,268 @@ def test_to_listing_area_haystack_excludes_description_text() -> None:
     listing = source.to_listing(record, context)
 
     assert listing.place.area_key is None
+
+
+def test_to_listing_rejects_unsupported_legacy_floor_and_parking_heuristics() -> None:
+    record = SourceRecord(
+        source="craigslist",
+        source_id="legacy-heuristics",
+        url="https://www.craigslist.org/view/d/legacy-heuristics",
+        content_hash="hash-legacy-heuristics",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "TOP-FLOOR 2-BEDROOM",
+            "description": "Secure bicycle storage in the garage.",
+            "address": "123 Main Street Vancouver BC",
+            "floor": 2,
+            "parking": "Included",
+            "price": 2500,
+        },
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+
+    assert listing.floor == Absence.NOT_STATED
+    assert listing.parking == Absence.NOT_STATED
+
+
+def test_to_listing_recovers_explicit_paid_parking_from_raw_text() -> None:
+    record = SourceRecord(
+        source="craigslist",
+        source_id="paid-parking",
+        url="https://www.craigslist.org/view/d/paid-parking",
+        content_hash="hash-paid-parking",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "Bright two bedroom apartment",
+            "description": "Parking available for $150/month.",
+            "address": "123 Main Street Vancouver BC",
+            "parking": "Included",
+            "price": 2500,
+        },
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+
+    assert isinstance(listing.parking, Observed)
+    assert listing.parking.value == "Available"
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("No parking available.", "Unavailable"),
+        ("Parking available for $150/month.", "Available"),
+        ("One parking stall is included in rent.", "Included"),
+    ],
+)
+def test_detail_parser_preserves_parking_semantics(description: str, expected: str) -> None:
+    payload = _parse_detail_html(
+        f"<html><head><title>Apartment</title></head>"
+        f"<body><section id='postingbody'>{description}</section></body></html>"
+    )
+
+    assert payload["parking"] == expected
+
+
+def test_detail_parser_respects_negative_furnishing_and_parking_labels() -> None:
+    payload = _parse_detail_html(
+        "<html><head><title>Apartment</title></head><body>"
+        "<section id='postingbody'>"
+        "Furnished: No. No dedicated parking included; street parking may be available."
+        "</section></body></html>"
+    )
+
+    assert payload["furnished"] == "Unfurnished"
+    assert payload["parking"] == "Unavailable"
+
+
+def test_detail_parser_bounds_full_text_and_collects_gallery() -> None:
+    description = "A" * 100_100
+    gallery = "".join(
+        f"<a href='https://images.example/{index}.jpg'></a>" for index in range(55)
+    )
+    payload = _parse_detail_html(
+        "<html><head><title>Apartment</title></head><body>"
+        f"<section id='postingbody'>{description}</section>"
+        f"<div id='thumbs'>{gallery}</div>"
+        "</body></html>"
+    )
+
+    assert len(payload["description"].encode("utf-8")) <= 100_000
+    assert payload["description_truncated"] is True
+    assert len(payload["photos"]) == 50
+    assert payload["photos_truncated"] is True
+
+
+def test_detail_parser_ignores_unrelated_page_text_when_extracting_facts() -> None:
+    payload = _parse_detail_html(
+        "<html><head><title>Bright apartment</title></head><body>"
+        "<div class='attrgroup'><span>2BR / 1Ba / 800ft2</span></div>"
+        "<section id='postingbody'>Quiet home near transit.</section>"
+        "<footer>Related listing: furnished 9BR on the 14th floor, parking included.</footer>"
+        "</body></html>"
+    )
+
+    assert payload["beds"] == 2
+    assert payload["baths"] == 1
+    assert payload["sqft"] == 800
+    assert "floor" not in payload
+    assert "parking" not in payload
+    assert "furnished" not in payload
+
+
+@pytest.mark.parametrize(
+    ("source_attributes", "expected_parking", "expected_laundry"),
+    [
+        ("parking included; w/d in unit", "Included", "attributes.in_suite_laundry"),
+        ("parking; laundry in bldg", None, "attributes.building_laundry"),
+    ],
+)
+def test_attribute_only_parking_and_laundry_survive_adapter_conversion(
+    source_attributes: str,
+    expected_parking: str | None,
+    expected_laundry: str,
+) -> None:
+    source_id = "AttributeOnly1"
+    payload = _parse_detail_html(
+        "<html><head><title>Bright apartment</title></head><body>"
+        f"<div class='attrgroup'><span>{source_attributes}</span></div>"
+        "</body></html>"
+    )
+    record = SourceRecord(
+        source="craigslist",
+        source_id=source_id,
+        url=f"https://vancouver.craigslist.org/van/apa/d/{source_id}.html",
+        content_hash="attribute-only-hash",
+        fetched_at=FIXED_NOW,
+        payload=payload,
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+    raw_attributes = listing.attributes["source_attributes"]
+    assert isinstance(raw_attributes, Observed)
+    assert raw_attributes.value == source_attributes
+    if expected_parking is None:
+        assert listing.parking == Absence.NOT_STATED
+    else:
+        assert isinstance(listing.parking, Observed)
+        assert listing.parking.value == expected_parking
+
+    updates = recover_missing_attributes(listing, context={}, observed_at=FIXED_NOW)
+    laundry = updates[expected_laundry]
+    assert isinstance(laundry, Observed)
+    assert laundry.value is True
+
+
+def test_fetch_detail_preserves_discovery_fields_and_records_complete_status() -> None:
+    source_id = "AbC123xYz9"
+    html = f"""
+    <html><head>
+      <link rel="canonical" href="https://vancouver.craigslist.org/van/apa/d/{source_id}.html">
+      <title>Detail title</title>
+    </head><body><span class="price">$2,500</span><section id="postingbody"></section></body></html>
+    """
+    record = SourceRecord(
+        source="craigslist",
+        source_id=source_id,
+        url=f"https://vancouver.craigslist.org/van/apa/d/{source_id}.html",
+        content_hash="discovery-hash",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "Useful discovery title",
+            "description": "Useful discovery description",
+            "photos": ["https://images.example/discovery.jpg"],
+        },
+    )
+
+    detailed = CraigslistSource(fetch_text=lambda _: html, now=lambda: FIXED_NOW).fetch_detail(
+        record
+    )
+    payload = _record_payload(detailed)
+
+    assert payload["description"] == "Useful discovery description"
+    assert payload["photos"] == ["https://images.example/discovery.jpg"]
+    assert payload["detail_status"] == "complete"
+    assert "detail_error" not in payload
+
+
+@pytest.mark.parametrize(
+    ("html", "expected_status"),
+    [
+        ("<html><body>This posting has been deleted by its author.</body></html>", "removed"),
+        ("<html><body>Verify you are human to continue.</body></html>", "blocked"),
+        (
+            "<html><head><link rel='canonical' "
+            "href='https://vancouver.craigslist.org/van/apa/d/WrongId99.html'></head></html>",
+            "failed",
+        ),
+    ],
+)
+def test_fetch_detail_records_terminal_and_identity_outcomes(
+    html: str,
+    expected_status: str,
+) -> None:
+    source_id = "AbC123xYz9"
+    record = SourceRecord(
+        source="craigslist",
+        source_id=source_id,
+        url=f"https://vancouver.craigslist.org/van/apa/d/{source_id}.html",
+        content_hash="discovery-hash",
+        fetched_at=FIXED_NOW,
+        payload={"title": "Discovery title"},
+    )
+
+    detailed = CraigslistSource(fetch_text=lambda _: html, now=lambda: FIXED_NOW).fetch_detail(
+        record
+    )
+    payload = _record_payload(detailed)
+
+    assert payload["detail_status"] == expected_status
+    assert isinstance(payload["detail_error"], str)
+    assert payload["title"] == "Discovery title"
+
+
+def test_fetch_detail_sanitizes_exception_messages() -> None:
+    def fail(_: str) -> str:
+        raise FileNotFoundError("/private/secret/source.html")
+
+    record = SourceRecord(
+        source="craigslist",
+        source_id="AbC123xYz9",
+        url="https://vancouver.craigslist.org/van/apa/d/AbC123xYz9.html",
+        content_hash="discovery-hash",
+        fetched_at=FIXED_NOW,
+        payload={"title": "Discovery title"},
+    )
+
+    detailed = CraigslistSource(fetch_text=fail, now=lambda: FIXED_NOW).fetch_detail(record)
+    payload = _record_payload(detailed)
+
+    assert payload["detail_status"] == "failed"
+    assert "/private/secret" not in str(payload["detail_error"])
+
+
+def test_to_listing_does_not_preserve_scalar_guesses_from_multi_unit_ranges() -> None:
+    record = SourceRecord(
+        source="craigslist",
+        source_id="multi-unit",
+        url="https://www.craigslist.org/view/d/multi-unit",
+        content_hash="hash-multi-unit",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "Choose from 1 & 2 bedroom apartments",
+            "description": "Floor plans range from 700-900 sqft.",
+            "beds": 2,
+            "sqft": 900,
+            "price": 2500,
+        },
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+
+    assert listing.beds == Absence.NOT_STATED
+    assert listing.area == Absence.NOT_STATED
 
 
 @pytest.mark.parametrize("rss_mode", ["403", "blocked_html"])
@@ -264,7 +528,7 @@ def _fixture_fetch_text(url: str) -> str:
     if "format=rss" in url:
         return _fixture("rss.xml")
     if "AbC123xYz9" in url:
-        return _fixture("detail.html")
+        return _fixture("detail.html").replace("ttyaU3MwTGwwdBcafMuZiN", "AbC123xYz9")
     if "zZ9yY8xX7w" in url:
         return _fixture("detail.html")
     raise AssertionError(f"unexpected craigslist fixture URL: {url}")

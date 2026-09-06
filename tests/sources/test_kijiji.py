@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -9,10 +10,10 @@ from typing import Any
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
-from nostos.model import Area, Listing, Observed, SourceRecord
+from nostos.model import Absence, Area, Listing, Observed, SourceRecord
 from nostos.rank.profile_scoring import passes_hard_filters
 from nostos.sources.base import Liveness
-from nostos.sources.kijiji import KijijiSource
+from nostos.sources.kijiji import KijijiSource, _detail_payload
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "kijiji"
 SEARCH_HTML = (FIXTURE_DIR / "search_vancouver_kitsilano.html").read_text(encoding="utf-8")
@@ -93,8 +94,7 @@ def test_to_listing_is_pure_and_structured() -> None:
     assert isinstance(listing.area, Observed)
     assert isinstance(listing.area.value, Area)
     assert listing.area.value.value == 840.0
-    assert isinstance(listing.parking, Observed)
-    assert listing.parking.value == "available"
+    assert listing.parking == Absence.NOT_STATED
     assert isinstance(listing.furnishing, Observed)
     assert listing.furnishing.value == "furnished"
 
@@ -213,6 +213,228 @@ def test_to_listing_basement_storage_text_passes_hard_filter_when_excluded() -> 
     listing = source.to_listing(record, context)
 
     assert passes_hard_filters(listing, context.profile) is True
+
+
+def test_to_listing_rejects_legacy_parking_boolean_without_raw_evidence() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684287",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684287",
+        content_hash="hash-legacy-parking",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Bright two bedroom apartment",
+            "description": "Secure bicycle storage in the garage.",
+            "address": "123 Main Street Vancouver BC",
+            "parking": True,
+            "price": 2500,
+        },
+    )
+
+    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, _build_context())
+
+    assert listing.parking == Absence.NOT_STATED
+
+
+def test_to_listing_rederives_negative_furnishing_label_from_raw_text() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684290",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+        content_hash="hash-furnished-no",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Bright apartment",
+            "description": "Furnished: No; one roommate sought.",
+            "furnishing": "furnished",
+        },
+    )
+
+    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, _build_context())
+
+    assert isinstance(listing.furnishing, Observed)
+    assert listing.furnishing.value == "unfurnished"
+
+
+def test_to_listing_preserves_explicit_negative_and_paid_parking_evidence() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+
+    no_parking = SourceRecord(
+        source="kijiji",
+        source_id="1742684288",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684288",
+        content_hash="hash-no-parking",
+        fetched_at=_fixed_now(),
+        payload={"description": "No parking available.", "parking": True},
+    )
+    paid_parking = SourceRecord(
+        source="kijiji",
+        source_id="1742684289",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684289",
+        content_hash="hash-paid-parking",
+        fetched_at=_fixed_now(),
+        payload={"description": "Parking available for $150/month.", "parking": True},
+    )
+
+    no_parking_listing = source.to_listing(no_parking, _build_context())
+    paid_parking_listing = source.to_listing(paid_parking, _build_context())
+
+    assert isinstance(no_parking_listing.parking, Observed)
+    assert no_parking_listing.parking.value == "Unavailable"
+    assert isinstance(paid_parking_listing.parking, Observed)
+    assert paid_parking_listing.parking.value == "Available"
+
+
+def test_detail_parser_does_not_turn_negated_parking_into_a_positive() -> None:
+    html = """
+    <html><head><script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Apartment",
+      "url": "https://www.kijiji.ca/v-apartments-condos/1742684290",
+      "name": "Two bedroom apartment",
+      "description": "No parking available for this unit.",
+      "offers": {"price": "2500"}
+    }
+    </script>
+    <script>window.messages = {"removed": "This ad is no longer available."};</script>
+    </head></html>
+    """
+
+    payload = _detail_payload(
+        html=html,
+        base_url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+    )
+
+    assert payload["parking"] == "Unavailable"
+
+
+def test_detail_parser_extracts_image_objects_and_bounds_gallery() -> None:
+    images = [
+        {"@type": "ImageObject", "contentUrl": f"https://images.example/{index}.jpg"}
+        for index in range(55)
+    ]
+    node = {
+        "@context": "https://schema.org",
+        "@type": "Apartment",
+        "url": "https://www.kijiji.ca/v-apartments-condos/1742684290",
+        "name": "Two bedroom apartment",
+        "description": "A" * 100_100,
+        "offers": {"price": "2500"},
+        "image": images,
+    }
+    html = (
+        '<html><head><script type="application/ld+json">'
+        f"{json.dumps(node)}</script></head></html>"
+    )
+
+    payload = _detail_payload(
+        html=html,
+        base_url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+    )
+
+    assert len(str(payload["description"]).encode("utf-8")) <= 100_000
+    assert payload["description_truncated"] is True
+    photos = payload["photos"]
+    assert isinstance(photos, list)
+    assert len(photos) == 50
+    assert payload["photos_truncated"] is True
+
+
+def test_fetch_detail_preserves_nonempty_discovery_fields() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684290",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+        content_hash="discovery-hash",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Useful discovery title",
+            "description": "Useful discovery description",
+            "photos": ["https://images.example/discovery.jpg"],
+        },
+    )
+    html = """
+    <html><head><script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Apartment",
+      "url": "https://www.kijiji.ca/v-apartments-condos/1742684290",
+      "name": "",
+      "description": "",
+      "offers": {"price": "2500"},
+      "image": []
+    }
+    </script>
+    <script>window.messages = {"removed": "This ad is no longer available."};</script>
+    </head></html>
+    """
+
+    detailed = KijijiSource(fetcher=lambda _: html, now_provider=_fixed_now).fetch_detail(record)
+    payload = _payload_mapping(detailed.payload)
+
+    assert payload["title"] == "Useful discovery title"
+    assert payload["description"] == "Useful discovery description"
+    assert payload["photos"] == ["https://images.example/discovery.jpg"]
+    assert payload["detail_status"] == "complete"
+
+
+def test_fetch_detail_rejects_wrong_listing_identity() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684290",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+        content_hash="discovery-hash",
+        fetched_at=_fixed_now(),
+        payload={"title": "Discovery title"},
+    )
+    html = """
+    <html><head><script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Apartment",
+      "url": "https://www.kijiji.ca/v-apartments-condos/9999999999",
+      "name": "Wrong unit",
+      "offers": {"price": "2500"}
+    }
+    </script></head></html>
+    """
+
+    detailed = KijijiSource(fetcher=lambda _: html, now_provider=_fixed_now).fetch_detail(record)
+    payload = _payload_mapping(detailed.payload)
+
+    assert payload["detail_status"] == "failed"
+    assert payload["title"] == "Discovery title"
+
+
+def test_fetch_detail_reports_blocked_removed_and_sanitized_failures() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684290",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684290",
+        content_hash="discovery-hash",
+        fetched_at=_fixed_now(),
+        payload={"title": "Discovery title"},
+    )
+    blocked = KijijiSource(
+        fetcher=lambda _: "<html><body>Verify you are human to continue.</body></html>",
+        now_provider=_fixed_now,
+    ).fetch_detail(record)
+    removed = KijijiSource(
+        fetcher=lambda _: "<html><body>This ad is no longer available.</body></html>",
+        now_provider=_fixed_now,
+    ).fetch_detail(record)
+
+    def fail(_: str) -> str:
+        raise RuntimeError("credential from /private/secret")
+
+    failed = KijijiSource(fetcher=fail, now_provider=_fixed_now).fetch_detail(record)
+
+    assert _payload_mapping(blocked.payload)["detail_status"] == "blocked"
+    assert _payload_mapping(removed.payload)["detail_status"] == "removed"
+    failed_payload = _payload_mapping(failed.payload)
+    assert failed_payload["detail_status"] == "failed"
+    assert "/private/secret" not in str(failed_payload["detail_error"])
 
 
 class FixtureFetcher:

@@ -95,6 +95,30 @@ The UI browses and edits criteria; fetching is started with `nostos watch` or th
 watch tool. See [the implementation review](docs/11-implementation-review.md) for
 criteria limitations and the next iteration workflow.
 
+## Listing detail enrichment
+
+Open a listing and choose **Review extracted details** to inspect proposed changes
+from saved evidence before applying them. User corrections take priority. Old machine
+claims can be retired when they have no supporting evidence; this can change a match
+into an unverified listing or a miss without changing your criteria.
+
+**Update listing details** fetches the original source in the background, captures its
+available description and gallery, and applies supported facts with updated ranking.
+The page shows progress and failures. Failed refreshes retain previous saved evidence;
+blocked/removed pages stop, while transient failures retry up to three times. Jobs
+recover after a service restart. Source claims are not independently verified facts.
+
+The normal `nostos web` command runs the local detail worker. A standalone `watch`
+continues to fetch details synchronously. For an installation with the web service
+running, use `nostos watch --queue-details --yes` to save discovery first and let its
+worker retrieve details. Without a running web worker, queued updates remain pending.
+City profiles and databases remain separate. There is no required LLM or agent host.
+
+Descriptions and image lists are bounded at 100 KB and 50 URLs. Gallery images load
+from the original source; expired or blocked images can remain unavailable. Floor-plan
+OCR, semantic model fallback and broader research synthesis remain separate work.
+See [the assessment and staged plan](docs/13-app-assessment-and-enrichment.md).
+
 ## Safety and scraping posture
 
 - Respects `robots.txt` by default.

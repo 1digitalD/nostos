@@ -510,7 +510,7 @@ def test_second_html_watch_skips_detail_for_seen_source_ids(tmp_path: Path) -> N
             return search_html
         if "/view/d/" in url:
             detailed_urls.append(url)
-            return detail_html
+            return _detail_html_for_url(detail_html, url)
         raise AssertionError(f"unexpected craigslist fixture URL: {url}")
 
     source = CraigslistSource(
@@ -627,8 +627,8 @@ def test_second_html_watch_fetches_detail_for_unseen_ids(tmp_path: Path) -> None
         if "/view/d/" in url:
             detailed_urls.append(url)
             if url.endswith("/NewRun2xY1"):
-                return detail_html_new_listing
-            return detail_html
+                return _detail_html_for_url(detail_html_new_listing, url)
+            return _detail_html_for_url(detail_html, url)
         raise AssertionError(f"unexpected craigslist fixture URL: {url}")
 
     source = CraigslistSource(
@@ -955,7 +955,7 @@ def test_second_craigslist_watch_with_nothing_new_does_not_alert(tmp_path: Path)
         if "format=rss" in url:
             return rss_xml
         if "AbC123xYz9" in url or "zZ9yY8xX7w" in url:
-            return detail_html
+            return _detail_html_for_url(detail_html, url)
         raise AssertionError(f"unexpected craigslist fixture URL: {url}")
 
     source = CraigslistSource(
@@ -1278,6 +1278,11 @@ def _source_counts(counts_json: dict[str, Any], source_name: str) -> dict[str, A
 
 def _detail_html_with_price(html: str, price: str) -> str:
     return html.replace("</body>", f'<span class="price">{price}</span></body>')
+
+
+def _detail_html_for_url(html: str, url: str) -> str:
+    source_id = url.rstrip("/").rsplit("/", maxsplit=1)[-1].removesuffix(".html")
+    return html.replace("ttyaU3MwTGwwdBcafMuZiN", source_id)
 
 
 def _projected_rent_amount(conn: sqlite3.Connection, *, listing_id: str) -> Decimal:

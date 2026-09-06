@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from nostos.config.profile import Profile
+from nostos.enrich.text import (
+    building_laundry_evidence,
+    floor_from_text,
+    in_suite_laundry_evidence,
+    parking_from_text,
+)
 from nostos.model import Absence, Area, Listing, Money, Observed
 
 RuleContext = object
@@ -133,6 +139,7 @@ def rule(
 _TEXT_PART_KEYS = (
     "title",
     "description",
+    "source_attributes",
     "address",
     "notes",
     "listingText",
@@ -141,28 +148,6 @@ _TEXT_PART_KEYS = (
     "structured_location",
 )
 
-_IN_SUITE_LAUNDRY_RE = re.compile(
-    r"\b(in[\s-]suite\s+laundry|in[\s-]unit\s+laundry|ensuite\s+laundry|"
-    r"private\s+laundry|own\s+laundry|washer[\s/\\]+dryer\s+in\s+"
-    r"(?:the|a|an)?\s*(?:suite|unit|apartment|home)|"
-    r"washer[\s\-/]+dryer\s+included|washer\s+and\s+dryer|"
-    r"washer\s*&\s*dryer|washer\s*/\s*dryer)\b",
-    re.IGNORECASE,
-)
-_BUILDING_LAUNDRY_RE = re.compile(
-    r"\b(coin[\s-]?(?:op(?:erated)?|[\s-]?laundry)|shared\s+laundry|"
-    r"common[\s-]area\s+laundry|common\s+laundry|building\s+laundry|"
-    r"on[\s-]site\s+laundry|onsite\s+laundry|laundry\s+in\s+"
-    r"(?:the|a|an|this|my)\s+building|laundry\s+in\s+building|"
-    r"central\s+laundry|communal\s+laundry|public\s+laundry)\b",
-    re.IGNORECASE,
-)
-_NEGATED_BUILDING_LAUNDRY_RE = re.compile(
-    r"\bno\s+(?:shared|coin|common|building|on[\s-]site|public)\s+laundry"
-    r"|\bprivate\s+laundry\b"
-    r"|\bno\s+(?:shared|common)\s+washer",
-    re.IGNORECASE,
-)
 _DEN_OR_SOLARIUM_RE = re.compile(r"\b(den|solarium)\b", re.IGNORECASE)
 _WALK_SCORE_RE = re.compile(r"[Ww]alk\s*[Ss]core[:\s/]*(\d{2,3})", re.IGNORECASE)
 _WALKABLE_PHRASE_RE = re.compile(
@@ -195,24 +180,12 @@ _SPARSE_PHRASE_RE = re.compile(
     r"quiet\s+neighborhood|family\s+neighborhood|low[\s-]density)\b",
     re.IGNORECASE,
 )
-_PARKING_NEGATIVE_RE = re.compile(
-    r"\b(?:no|without)\s+(?:on[\s-]site\s+)?(?:parking|garage|stall)\b"
-    r"|\bparking\s+(?:is\s+)?(?:not|isn't)\s+(?:included|available)\b"
-    r"|\bno\s+parking\s+available\b",
-    re.IGNORECASE,
-)
 # Whole-word checks for a normalized parking field such as "Available",
 # "Included", "Unavailable" or "None". Substring matching is not safe here:
 # "Unavailable" contains "available".
 _PARKING_KEYWORD_RE = re.compile(r"\b(?:available|included|yes|stall|garage)\b", re.IGNORECASE)
 _PARKING_NEGATIVE_KEYWORD_RE = re.compile(
     r"\b(?:unavailable|none|no|not\s+available|not\s+included|n/a)\b", re.IGNORECASE
-)
-_PARKING_POSITIVE_RE = re.compile(
-    r"\b(?:parking|garage|stall)\s+(?:is\s+)?(?:included|available)\b|"
-    r"\b(?:includes?|comes?\s+with)\s+(?:an?\s+|one\s+)?(?:parking|garage|stall)\b|"
-    r"\b(?:one|1)\s+(?:underground\s+|secured\s+)?parking\s+stall\b",
-    re.IGNORECASE,
 )
 _PET_NO_RE = re.compile(
     r"\b(no\s+pets?|pet[-\s]?free|sorry\s+no\s+pets?|pets?\s+not\s+allowed|"
@@ -229,48 +202,6 @@ _PET_CONDITIONAL_RE = re.compile(
     r"landlord\s+approval|pet\s+deposit|pet\s+restrictions)\b",
     re.IGNORECASE,
 )
-
-_ORDINAL_WORDS = {
-    "first": 1,
-    "1st": 1,
-    "second": 2,
-    "2nd": 2,
-    "third": 3,
-    "3rd": 3,
-    "fourth": 4,
-    "4th": 4,
-    "fifth": 5,
-    "5th": 5,
-    "sixth": 6,
-    "6th": 6,
-    "seventh": 7,
-    "7th": 7,
-    "eighth": 8,
-    "8th": 8,
-    "ninth": 9,
-    "9th": 9,
-    "tenth": 10,
-    "10th": 10,
-    "eleventh": 11,
-    "11th": 11,
-    "twelfth": 12,
-    "12th": 12,
-}
-_FLOOR_EXPLICIT_RE = re.compile(
-    r"\b(?:floor|level|storey|story)\s*(\d{1,2})\b"
-    r"|\b(\d{1,2})(?:st|nd|rd|th)\s+(?:floor|level|storey|story)\b"
-    r"|\b("
-    + "|".join(re.escape(word) for word in _ORDINAL_WORDS)
-    + r")\s+(?:floor|level|storey|story)\b",
-    re.IGNORECASE,
-)
-_UNIT_NUMBER_RE = re.compile(
-    r"(?:#\s*(\d{1,4})\b)"
-    r"|\b(?:unit|apt|suite|ph|penthouse)\s*#?\s*(\d{1,4})\b"
-    r"|\b(?:unit|apt|suite)\s+(?:no\.?|#)?\s*(\d{3,4})\s*[-–]\s*\d{2,5}",
-    re.IGNORECASE,
-)
-
 
 def _text_attribute_value(listing: Listing, key: str) -> str | None:
     value = listing.attributes.get(key)
@@ -340,6 +271,15 @@ def _signal_from_presence(evidence: str, *, confidence: float = 1.0) -> Signal:
     )
 
 
+def _signal_from_explicit_absence(evidence: str, *, confidence: float = 1.0) -> Signal:
+    return Signal(
+        fired=True,
+        magnitude=0.0,
+        confidence=confidence,
+        evidence=evidence,
+    )
+
+
 def _profile_from_context(context: RuleContext) -> Profile | None:
     profile = getattr(context, "profile", None)
     if isinstance(profile, Profile):
@@ -359,57 +299,19 @@ def _observed_text_field(field: Observed[str] | Absence) -> tuple[str, float, st
 
 
 def _in_suite_laundry_evidence(text: str) -> str | None:
-    if not text:
-        return None
-    negated_match = _NEGATED_BUILDING_LAUNDRY_RE.search(text)
-    if negated_match is not None:
-        return negated_match.group(0).strip()
-    match = _IN_SUITE_LAUNDRY_RE.search(text)
-    if match is None:
-        return None
-    return match.group(0).strip()
+    return in_suite_laundry_evidence(text)
 
 
 def _building_laundry_evidence(text: str) -> str | None:
-    if not text:
-        return None
-    if _NEGATED_BUILDING_LAUNDRY_RE.search(text):
-        return None
-    match = _BUILDING_LAUNDRY_RE.search(text)
-    if match is None:
-        return None
-    return match.group(0).strip()
+    return building_laundry_evidence(text)
 
 
 def _floor_from_text(text: str) -> tuple[float, str] | None:
-    if not text:
+    parsed = floor_from_text(text)
+    if parsed is None:
         return None
-
-    explicit_match = _FLOOR_EXPLICIT_RE.search(text)
-    if explicit_match is not None:
-        for group in explicit_match.groups():
-            if group is None:
-                continue
-            key = group.lower()
-            if key in _ORDINAL_WORDS:
-                return float(_ORDINAL_WORDS[key]), explicit_match.group(0).strip()
-            floor_value = int(group)
-            return float(floor_value), explicit_match.group(0).strip()
-
-    unit_match = _UNIT_NUMBER_RE.search(text)
-    if unit_match is None:
-        return None
-
-    unit_text = unit_match.group(1) or unit_match.group(2) or unit_match.group(3)
-    if unit_text is None:
-        return None
-    unit_number = int(unit_text)
-    if not 100 <= unit_number <= 9999:
-        return None
-    floor_value = unit_number // 100
-    if not 1 <= floor_value <= 80:
-        return None
-    return float(floor_value), unit_match.group(0).strip()
+    floor_value, evidence = parsed
+    return float(floor_value), evidence
 
 
 def _walk_score_from_text(text: str) -> tuple[float, str] | None:
@@ -439,18 +341,11 @@ def _density_phrase(text: str) -> tuple[str, str] | None:
 
 
 def _parking_text_is_negative(text: str) -> bool:
-    return bool(_PARKING_NEGATIVE_RE.search(text) or _PARKING_NEGATIVE_KEYWORD_RE.search(text))
-
-
-def _parking_evidence(text: str) -> str | None:
-    if not text:
-        return None
-    if _PARKING_NEGATIVE_RE.search(text):
-        return None
-    match = _PARKING_POSITIVE_RE.search(text)
-    if match is None:
-        return None
-    return match.group(0).strip()
+    parsed = parking_from_text(text)
+    return bool(
+        (parsed is not None and parsed[0] == "Unavailable")
+        or _PARKING_NEGATIVE_KEYWORD_RE.search(text)
+    )
 
 
 def _pet_policy(text: str) -> tuple[str, str] | None:
@@ -789,14 +684,21 @@ def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None
         is_available, confidence, evidence = bool_value
         if is_available:
             return _signal_from_presence(evidence or "parking available", confidence=confidence)
-        return None
+        return _signal_from_explicit_absence(
+            evidence or "parking unavailable", confidence=confidence
+        )
 
     parking_field = _observed_text_field(listing.parking)
     if parking_field is not None:
         parking_text, confidence, evidence = parking_field
         if _parking_text_is_negative(parking_text):
-            return None
-        if _PARKING_POSITIVE_RE.search(parking_text) or _PARKING_KEYWORD_RE.search(parking_text):
+            return _signal_from_explicit_absence(evidence or parking_text, confidence=confidence)
+        parsed = parking_from_text(parking_text)
+        if (
+            parsed is not None
+            and parsed[0] in {"Available", "Included"}
+            or _PARKING_KEYWORD_RE.search(parking_text)
+        ):
             return _signal_from_presence(evidence or parking_text, confidence=confidence)
         return None
 
@@ -808,16 +710,24 @@ def _detect_parking_available(listing: Listing, _: RuleContext) -> Signal | None
     if attr_field is not None:
         parking_text, confidence, evidence = attr_field
         if _parking_text_is_negative(parking_text):
-            return None
-        if _PARKING_POSITIVE_RE.search(parking_text) or _PARKING_KEYWORD_RE.search(parking_text):
+            return _signal_from_explicit_absence(evidence or parking_text, confidence=confidence)
+        parsed = parking_from_text(parking_text)
+        if (
+            parsed is not None
+            and parsed[0] in {"Available", "Included"}
+            or _PARKING_KEYWORD_RE.search(parking_text)
+        ):
             return _signal_from_presence(evidence or parking_text, confidence=confidence)
         return None
 
     text = _combined_text(listing)
-    parking_evidence = _parking_evidence(text)
-    if parking_evidence is None:
+    parking_fact = parking_from_text(text)
+    if parking_fact is None:
         return None
-    return _signal_from_presence(parking_evidence)
+    parking_value, evidence = parking_fact
+    if parking_value == "Unavailable":
+        return _signal_from_explicit_absence(evidence)
+    return _signal_from_presence(evidence)
 
 
 @rule(

@@ -9,13 +9,20 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
 from nostos.enrich.location import point_from_html
+from nostos.enrich.text import (
+    floor_from_text,
+    furnishing_from_text,
+    has_ambiguous_area_range,
+    has_ambiguous_bedroom_range,
+    parking_from_text,
+)
 from nostos.model import (
     Absence,
     Area,
@@ -41,14 +48,13 @@ CL_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/127.0.0.0 Safari/537.36"
 )
+DETAIL_TEXT_MAX_BYTES = 100_000
+DETAIL_PHOTO_MAX = 50
 _ID_RE = re.compile(r"/([A-Za-z0-9]+)(?:[?#].*)?$")
 _PRICE_RE = re.compile(r"\$([\d,]+)")
 _BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*br\b", re.IGNORECASE)
 _BATHS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)s?\b", re.IGNORECASE)
 _SQFT_RE = re.compile(r"(\d{3,5})\s*(?:ft2|sq\.?\s*ft|sqft|square\s*feet)\b", re.IGNORECASE)
-_UNIT_RE = re.compile(r"(?:#|unit|apt|suite)\s*(\d{1,4})", re.IGNORECASE)
-
-
 class CraigslistRobotsBlockedError(Exception):
     """Raised when robots.txt refused every discovery URL for every configured area.
 
@@ -212,18 +218,73 @@ class CraigslistSource:
 
         try:
             html = self._fetch_text(rec.url)
-            detail = _parse_detail_html(html)
-            payload_copy.update(
-                {key: value for key, value in detail.items() if value not in (None, "")}
-            )
+        except RobotsDisallowedError:
+            payload_copy["detail_status"] = "blocked"
+            payload_copy["detail_error"] = "source robots policy blocked the detail request"
+        except Exception as exc:
+            payload_copy["detail_status"] = "failed"
+            payload_copy["detail_error"] = _sanitized_fetch_error(exc)
+        else:
+            page_outcome = _detail_page_outcome(html)
+            if page_outcome is not None:
+                status, error = page_outcome
+                payload_copy["detail_status"] = status
+                payload_copy["detail_error"] = error
+            else:
+                try:
+                    detail = _parse_detail_html(html)
+                    canonical_url = _canonical_url_from_html(html)
+                except Exception as exc:
+                    payload_copy["detail_status"] = "failed"
+                    payload_copy["detail_error"] = _sanitized_parse_error(exc)
+                else:
+                    if not _detail_identity_matches(rec, canonical_url):
+                        payload_copy["detail_status"] = "failed"
+                        payload_copy["detail_error"] = (
+                            "detail page identity did not match the requested listing"
+                        )
+                    elif not _has_listing_detail(detail):
+                        payload_copy["detail_status"] = "failed"
+                        payload_copy["detail_error"] = (
+                            "detail page did not contain recognizable listing content"
+                        )
+                    else:
+                        if canonical_url:
+                            detail["canonical_url"] = canonical_url
+                        payload_copy.update(
+                            {
+                                key: value
+                                for key, value in detail.items()
+                                if _has_detail_value(value)
+                            }
+                        )
+                        partial = bool(
+                            not canonical_url
+                            or payload_copy.get("description_truncated")
+                            or payload_copy.get("source_attributes_truncated")
+                            or payload_copy.get("photos_truncated")
+                        )
+                        payload_copy["detail_status"] = (
+                            "partial" if partial else "complete"
+                        )
+                        if not canonical_url:
+                            payload_copy["detail_error"] = (
+                                "canonical URL unavailable; source identity was not "
+                                "independently verified"
+                            )
+                        elif partial:
+                            payload_copy["detail_error"] = (
+                                "detail content was truncated at storage limits"
+                            )
+                        else:
+                            payload_copy.pop("detail_error", None)
+
             payload_copy["posted"] = cl_posted_iso(
                 _coerce_str(payload_copy.get("posted")),
                 _coerce_str(payload_copy.get("posted_label")),
                 current=fetched_at,
             )
             payload_copy.pop("posted_label", None)
-        except Exception as exc:
-            payload_copy["detail_error"] = str(exc)
 
         return SourceRecord(
             source=rec.source,
@@ -239,7 +300,10 @@ class CraigslistSource:
         marker = payload.get("liveness")
         if marker in {"ok", "degraded", "failed"}:
             return Liveness(_coerce_str(marker))
-        if payload.get("detail_error"):
+        detail_status = _coerce_str(payload.get("detail_status"))
+        if detail_status == "removed":
+            return Liveness.FAILED
+        if detail_status in {"blocked", "failed"} or payload.get("detail_error"):
             return Liveness.DEGRADED
         if not _coerce_str(payload.get("title")) and not _coerce_int(payload.get("price")):
             return Liveness.DEGRADED
@@ -255,9 +319,18 @@ class CraigslistSource:
         beds = _coerce_float(payload.get("beds"))
         baths = _coerce_float(payload.get("baths"))
         sqft = _coerce_float(payload.get("sqft"))
-        floor = _coerce_int(payload.get("floor"))
-        parking = _coerce_str(payload.get("parking"))
-        furnishing = _coerce_str(payload.get("furnished"))
+        description = _coerce_str(payload.get("description"))
+        source_attributes = _coerce_str(payload.get("source_attributes"))
+        evidence_text = " ".join(
+            part for part in (title, description, source_attributes) if part
+        )
+        if has_ambiguous_bedroom_range(evidence_text):
+            beds = None
+        if has_ambiguous_area_range(evidence_text):
+            sqft = None
+        floor_fact = floor_from_text(evidence_text)
+        parking_fact = parking_from_text(evidence_text)
+        furnishing_fact = furnishing_from_text(evidence_text)
 
         area_key = _infer_area_key(
             payload=payload,
@@ -282,7 +355,6 @@ class CraigslistSource:
                 Origin.SOURCE_FIELD,
                 "craigslist posted",
             )
-        description = _coerce_str(payload.get("description"))
         if description:
             attributes["description"] = _text_observed(
                 description, observed_at, Origin.DETAIL_PAGE, "craigslist posting body"
@@ -293,6 +365,13 @@ class CraigslistSource:
                 observed_at,
                 Origin.SOURCE_FIELD,
                 "craigslist title",
+            )
+        if source_attributes:
+            attributes["source_attributes"] = _text_observed(
+                source_attributes,
+                observed_at,
+                Origin.DETAIL_PAGE,
+                "craigslist listing attributes",
             )
 
         photos = _parse_photos(payload)
@@ -334,16 +413,26 @@ class CraigslistSource:
                 origin=origin,
             ),
             floor=_int_field(
-                floor,
+                floor_fact[0] if floor_fact is not None else None,
                 observed_at=observed_at,
-                origin=origin,
-                evidence="craigslist floor",
+                origin=Origin.TEXT_RULE,
+                evidence=floor_fact[1] if floor_fact is not None else "craigslist floor",
             ),
             parking=_string_field(
-                parking, observed_at=observed_at, origin=origin, evidence="craigslist parking"
+                parking_fact[0] if parking_fact is not None else "",
+                observed_at=observed_at,
+                origin=Origin.TEXT_RULE,
+                evidence=parking_fact[1] if parking_fact is not None else "craigslist parking",
             ),
             furnishing=_string_field(
-                furnishing, observed_at=observed_at, origin=origin, evidence="craigslist furnishing"
+                furnishing_fact[0] if furnishing_fact is not None else "",
+                observed_at=observed_at,
+                origin=Origin.TEXT_RULE,
+                evidence=(
+                    furnishing_fact[1]
+                    if furnishing_fact is not None
+                    else "craigslist furnishing"
+                ),
             ),
             photos=photos,
             attributes=attributes,
@@ -543,9 +632,11 @@ def _parse_detail_html(html: str) -> dict[str, Any]:
     if title:
         result["title"] = title
 
-    photo_url = _meta_content(node, "og:image")
-    if photo_url:
-        result["photo"] = photo_url
+    photo_urls = _craigslist_gallery_urls(node)
+    if photo_urls:
+        result["photo"] = photo_urls[0]
+        result["photos"] = photo_urls[:DETAIL_PHOTO_MAX]
+        result["photos_truncated"] = len(photo_urls) > DETAIL_PHOTO_MAX
 
     posted = _attribute(node, "time[datetime]", "datetime")
     if posted:
@@ -553,16 +644,34 @@ def _parse_detail_html(html: str) -> dict[str, Any]:
 
     posting_body = _node_text(node.css_first("#postingbody"))
     if posting_body:
-        result["description"] = posting_body[:2000]
+        description, truncated = _bounded_utf8_text(posting_body)
+        result["description"] = description
+        result["description_truncated"] = truncated
 
-    text_blob = " ".join(filter(None, [title, posting_body, _node_text(node.body)]))
-    beds = _coerce_float(_regex_group(_BEDS_RE, text_blob))
+    attribute_text = " ".join(
+        filter(None, (_node_text(attribute_group) for attribute_group in node.css(".attrgroup")))
+    )
+    source_attributes = ""
+    if attribute_text:
+        source_attributes, truncated = _bounded_utf8_text(attribute_text)
+        result["source_attributes"] = source_attributes
+        result["source_attributes_truncated"] = truncated
+    text_blob = " ".join(filter(None, [title, posting_body, source_attributes]))
+    beds = (
+        None
+        if has_ambiguous_bedroom_range(text_blob)
+        else _coerce_float(_regex_group(_BEDS_RE, text_blob))
+    )
     if beds is not None:
         result["beds"] = beds
     baths = _coerce_float(_regex_group(_BATHS_RE, text_blob))
     if baths is not None:
         result["baths"] = baths
-    sqft = _coerce_int(_regex_group(_SQFT_RE, text_blob))
+    sqft = (
+        None
+        if has_ambiguous_area_range(text_blob)
+        else _coerce_int(_regex_group(_SQFT_RE, text_blob))
+    )
     if sqft is not None:
         result["sqft"] = sqft
 
@@ -579,19 +688,132 @@ def _parse_detail_html(html: str) -> dict[str, Any]:
     if address:
         result["address"] = address
 
-    floor = _infer_floor(title=title or "", address=address)
-    if floor is not None:
-        result["floor"] = floor
+    floor_fact = floor_from_text(text_blob)
+    if floor_fact is not None:
+        result["floor"] = floor_fact[0]
 
-    lowered = text_blob.lower()
-    if "unfurnished" in lowered:
-        result["furnished"] = "Unfurnished"
-    elif "furnished" in lowered:
-        result["furnished"] = "Furnished"
-    if any(token in lowered for token in ("parking", "garage", "stall")):
-        result["parking"] = "Included"
+    furnishing_fact = furnishing_from_text(text_blob)
+    if furnishing_fact is not None:
+        result["furnished"] = furnishing_fact[0]
+    parking_fact = parking_from_text(text_blob)
+    if parking_fact is not None:
+        result["parking"] = parking_fact[0]
 
     return result
+
+
+def _craigslist_gallery_urls(node: HTMLParser) -> list[str]:
+    candidates = [
+        _coerce_str(link.attributes.get("href")) for link in node.css("#thumbs a[href]")
+    ]
+    og_image = _meta_content(node, "og:image")
+    if og_image:
+        candidates.append(og_image)
+    deduped: dict[str, None] = {}
+    for candidate in candidates:
+        if candidate and _is_http_url(candidate):
+            deduped.setdefault(candidate, None)
+    return list(deduped)
+
+
+def _bounded_utf8_text(text: str) -> tuple[str, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= DETAIL_TEXT_MAX_BYTES:
+        return text, False
+    bounded = encoded[:DETAIL_TEXT_MAX_BYTES].decode("utf-8", errors="ignore")
+    return bounded, True
+
+
+def _canonical_url_from_html(html: str) -> str:
+    node = HTMLParser(html)
+    canonical = _attribute(node, 'link[rel="canonical"]', "href")
+    return canonical or _meta_content(node, "og:url")
+
+
+def _detail_identity_matches(rec: SourceRecord, canonical_url: str) -> bool:
+    if rec.source != CL_SOURCE_NAME or _source_id_from_url(rec.url) != rec.source_id:
+        return False
+    return not canonical_url or _source_id_from_url(canonical_url) == rec.source_id
+
+
+def _source_id_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if not parsed.hostname or not parsed.hostname.endswith("craigslist.org"):
+        return None
+    final_segment = parsed.path.rstrip("/").rsplit("/", maxsplit=1)[-1]
+    if final_segment.endswith(".html"):
+        final_segment = final_segment.removesuffix(".html")
+    return final_segment if re.fullmatch(r"[A-Za-z0-9]+", final_segment) else None
+
+
+def _detail_page_outcome(html: str) -> tuple[str, str] | None:
+    normalized = _visible_page_text(html)
+    if any(
+        marker in normalized
+        for marker in (
+            "this posting has been deleted",
+            "this posting has expired",
+            "this posting has been flagged for removal",
+            "page not found - craigslist",
+        )
+    ):
+        return "removed", "listing is no longer available"
+    if any(
+        marker in normalized
+        for marker in (
+            "verify you are human",
+            "request has been blocked",
+            "this ip has been automatically blocked",
+            "captcha",
+        )
+    ):
+        return "blocked", "source challenge blocked the detail request"
+    return None
+
+
+def _visible_page_text(html: str) -> str:
+    node = HTMLParser(html)
+    for hidden in node.css("script, style, noscript"):
+        hidden.decompose()
+    body = node.body
+    return " ".join(_node_text(body).lower().split())
+
+
+def _has_detail_value(value: object) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _has_listing_detail(detail: Mapping[str, object]) -> bool:
+    return any(
+        _has_detail_value(detail.get(key))
+        for key in (
+            "description",
+            "source_attributes",
+            "photos",
+            "price",
+            "address",
+            "beds",
+            "baths",
+            "sqft",
+        )
+    )
+
+
+def _sanitized_fetch_error(exc: Exception) -> str:
+    return f"detail fetch failed ({type(exc).__name__})"
+
+
+def _sanitized_parse_error(exc: Exception) -> str:
+    return f"detail parse failed ({type(exc).__name__})"
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _meta_content(node: HTMLParser, prop_name: str) -> str:
@@ -664,19 +886,6 @@ def _looks_like_address(value: str) -> bool:
 
 def _is_google_map_placeholder(value: str) -> bool:
     return bool(re.match(r"^google map", value.strip(), re.IGNORECASE))
-
-
-def _infer_floor(*, title: str, address: str) -> int | None:
-    combined = f"{title} {address}"
-    match = _UNIT_RE.search(combined)
-    if match is None:
-        return None
-    unit = _coerce_int(match.group(1))
-    if unit is None:
-        return None
-    if unit >= 100:
-        return unit // 100
-    return unit
 
 
 def _parse_photos(payload: Mapping[str, Any]) -> list[Photo]:
@@ -894,4 +1103,3 @@ def _content_hash(payload: Mapping[str, Any]) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-

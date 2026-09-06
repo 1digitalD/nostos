@@ -1713,3 +1713,21 @@ button, input, select, textarea { font: inherit; }
   .research-topic:last-child { grid-column: auto; }
   .category-row { grid-template-columns: 110px 1fr 44px; }
 }
+
+/* Evidence stays close to the fact without overwhelming the decision summary. */
+.fact-evidence { margin-top: 6px; font-size: 12px; font-weight: 400; }
+.fact-evidence summary, .source-description summary { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.fact-evidence p { margin: 8px 0; }
+.source-description { margin-top: 20px; }
+.listing-description { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 75ch; line-height: 1.65; margin-top: 16px; }
+.extraction-review { max-width: 940px; margin: 24px auto; }
+.extraction-review h1 { margin-bottom: 12px; }
+.extraction-changes { padding: 0; list-style: none; }
+.extraction-changes > li { padding: 18px 0; border-bottom: 1px solid var(--border); }
+.extraction-changes h3 { margin: 0 0 8px; font-size: 16px; }
+.extraction-changes p { overflow-wrap: anywhere; margin: 8px 0; }
+.extraction-actions { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 24px; }
+
+.remaining-photos { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 16px; }
+.remaining-photos img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.unavailable-photo { display: grid; place-items: center; height: 100%; min-height: 120px; padding: 16px; color: var(--muted); }

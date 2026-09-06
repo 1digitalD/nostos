@@ -376,6 +376,10 @@ def watch_command(
             ),
         ),
     ] = False,
+    queue_details: Annotated[
+        bool,
+        typer.Option("--queue-details", help="Queue detail fetching for the running web worker."),
+    ] = False,
     yes: Annotated[
         bool,
         typer.Option("--yes", help="Skip confirmation prompts."),
@@ -430,6 +434,7 @@ def watch_command(
             sources=active_sources,
             profile_id=profile_id,
             notifier=notifier,
+            queue_details=queue_details,
         )
 
     typer.echo(f"profile_path={profile_path}")
@@ -942,6 +947,7 @@ def web_command(
         db_path=db_path,
         profile_path=profile_path,
         citypack_path=citypack_path,
+        enable_detail_worker=True,
     )
     typer.echo(f"profile_path={profile_path}")
     typer.echo(f"db_path={db_path}")

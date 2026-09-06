@@ -12,19 +12,21 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from nostos.config.profile import ScaledWeight
 from nostos.context import SearchContext
 from nostos.corrections import apply_geo_observations, apply_user_corrections
 from nostos.enrich.base import Enricher
+from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.review import load_current_extraction_revision
 from nostos.enrich.text import TextRuleEnricher
-from nostos.model import SourceRecord
+from nostos.model import JSONValue, Listing, Observed, SourceRecord
 from nostos.rank.engine import RankEngine, ScoreResult
-from nostos.rank.profile_scoring import score_listing_for_profile
+from nostos.rank.profile_scoring import passes_hard_filters
 from nostos.sources.base import Source
 from nostos.store.db import apply_migrations
-from nostos.store.repo import ScoreRepo
+from nostos.store.repo import ObservationRepo, ScoreRepo
 
 
 class SourceRecordRow(NamedTuple):
@@ -74,20 +76,33 @@ def rescore_profile(
     with conn:
         conn.execute("DELETE FROM score WHERE profile_id = ?", (profile_id,))
         for record_row in rows:
-            source_obj = sources.get(record_row.record.source)
-            if source_obj is None:
-                skipped += 1
-                continue
-            listing = source_obj.to_listing(record_row.record, context)
-            # ``to_listing`` derives a per-source identity; re-key to the
-            # canonical id the record is stored under (post cross-source dedupe).
-            if listing.identity.listing_id != record_row.listing_id:
-                listing = listing.model_copy(
-                    update={
-                        "identity": listing.identity.model_copy(
-                            update={"listing_id": record_row.listing_id}
-                        )
-                    }
+            current = load_current_extraction_revision(
+                conn, listing_id=record_row.listing_id
+            )
+            if current is not None:
+                listing = current.machine_listing
+            else:
+                source_obj = sources.get(record_row.record.source)
+                if source_obj is None:
+                    skipped += 1
+                    continue
+                raw_listing = source_obj.to_listing(record_row.record, context)
+                # ``to_listing`` derives a per-source identity; re-key to the
+                # canonical id the record is stored under (post cross-source dedupe).
+                if raw_listing.identity.listing_id != record_row.listing_id:
+                    raw_listing = raw_listing.model_copy(
+                        update={
+                            "identity": raw_listing.identity.model_copy(
+                                update={"listing_id": record_row.listing_id}
+                            )
+                        }
+                    )
+                listing = run_enricher_chain(raw_listing, active_enrichers, context)
+                _persist_enrichment(
+                    conn,
+                    listing_id=record_row.listing_id,
+                    before=raw_listing,
+                    after=listing,
                 )
             listing = apply_geo_observations(
                 conn, listing_id=record_row.listing_id, listing=listing
@@ -95,17 +110,11 @@ def rescore_profile(
             listing = apply_user_corrections(
                 conn, listing_id=record_row.listing_id, listing=listing
             )
-            scored_listing = score_listing_for_profile(
-                listing,
-                context=context,
-                enrichers=active_enrichers,
-                rank_engine=rank_engine,
-            )
-            if scored_listing is None:
+            if not passes_hard_filters(listing, context.profile):
                 skipped += 1
                 continue
-            result = scored_listing.result
-            listing_id = scored_listing.listing.identity.listing_id
+            result = rank_engine.score_listing(listing, context=context)
+            listing_id = listing.identity.listing_id
             score_repo.upsert_score(
                 listing_id=listing_id,
                 profile_id=profile_id,
@@ -116,6 +125,62 @@ def rescore_profile(
             scored.append((listing_id, result.score))
     scored.sort(key=lambda item: (-item[1], item[0]))
     return RescoreReport(profile_id=profile_id, rows=tuple(scored), skipped=skipped)
+
+
+def _persist_enrichment(
+    conn: sqlite3.Connection,
+    *,
+    listing_id: str,
+    before: Listing,
+    after: Listing,
+) -> None:
+    before_fields = _observed_fields(before)
+    repo = ObservationRepo(conn)
+    for field, observed in _observed_fields(after).items():
+        if before_fields.get(field) == observed:
+            continue
+        value_json = cast(JSONValue, observed.model_dump(mode="json")["value"])
+        encoded = json.dumps(value_json, separators=(",", ":"), sort_keys=True)
+        duplicate = conn.execute(
+            """
+            SELECT 1 FROM observation
+            WHERE listing_id=? AND field=? AND origin=? AND value_json=?
+              AND confidence=? AND COALESCE(evidence,'')=COALESCE(?,'')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (
+                listing_id,
+                field,
+                observed.origin.value,
+                encoded,
+                observed.confidence,
+                observed.evidence,
+            ),
+        ).fetchone()
+        if duplicate is not None:
+            continue
+        repo.record_observation(
+            listing_id=listing_id,
+            field=field,
+            value_json=value_json,
+            origin=observed.origin,
+            confidence=observed.confidence,
+            evidence=observed.evidence,
+            observed_at=observed.observed_at,
+            schema_version=after.schema_version,
+        )
+
+
+def _observed_fields(listing: Listing) -> dict[str, Observed[Any]]:
+    fields: dict[str, Observed[Any]] = {}
+    for field in ("rent", "beds", "baths", "area", "floor", "parking", "furnishing"):
+        value = getattr(listing, field)
+        if isinstance(value, Observed):
+            fields[field] = value
+    for key, value in listing.attributes.items():
+        if isinstance(value, Observed):
+            fields[f"attributes.{key}"] = value
+    return fields
 
 
 def latest_source_records(conn: sqlite3.Connection) -> tuple[SourceRecordRow, ...]:

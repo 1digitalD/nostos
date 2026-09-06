@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Review extracted details · Nostos{% endblock %}
+{% block content %}
+{% set id = preview.listing_id if preview else listing_id %}
+<a class="back" href="/listings/{{ id }}">Back to listing</a>
+<section class="extraction-review detail-section">
+  <h1>Review extracted details</h1>
+  {% if not preview %}
+    <p role="alert">This preview is no longer current. The listing, your corrections, or your criteria changed. Nothing was applied.</p>
+    <a class="btn btn-primary" href="/listings/{{ id }}/extraction-review">Create a fresh preview</a>
+  {% else %}
+    <p>These changes use saved source content. No new page was fetched. Your corrections take priority.</p>
+    <p><a href="{{ preview.source.url }}" target="_blank" rel="noopener noreferrer">Open original listing</a> · Source saved {{ preview.source.fetched_at | relativetime }}</p>
+    {% if preview.source.limitations %}<ul class="extraction-limitations" role="note">{% for limitation in preview.source.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul>{% endif %}
+    <p><strong>After applying:</strong> {% if preview.eligible %}Eligible for ranking under your current criteria{% else %}Does not qualify for ranking under your current criteria{% endif %}.{% if preview.score is not none %} Score: {{ '%.0f'|format(preview.score) }}.{% endif %} Unknown facts still need verification.</p>
+    {% if preview.changes %}
+    <ul class="extraction-changes">
+      {% for change in preview.changes %}
+      <li><h3>{{ change.field | replace('attributes.', '') | replace('_', ' ') | title }}</h3>
+        <p><strong>Previously:</strong> {{ (change.before.value if change.before else none) | fact_value }}</p>
+        <p><strong>Proposed:</strong> {{ (change.after.value if change.after else none) | fact_value }}</p>
+        {% if change.after and change.after.evidence %}<p><strong>Evidence:</strong> {{ change.after.evidence }}</p>{% else %}<p>No supported evidence remains in the saved source for this fact.</p>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<p>No fact changes were found. Applying records this review and aligns the ranking with the saved evidence.</p>{% endif %}
+    {% set description = preview.resolved_listing.attributes.get('description') %}
+    {% if description and description.value %}<details class="source-description"><summary>Inspect saved source text</summary><div class="listing-description">{{ description.value }}</div></details>{% endif %}
+    <form method="post" action="/listings/{{ id }}/extraction-review" class="extraction-actions">
+      <input type="hidden" name="token" value="{{ preview.preview_token }}">
+      <button type="submit" class="btn btn-primary">Apply reviewed details</button>
+      <a href="/listings/{{ id }}">Keep current details</a>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}

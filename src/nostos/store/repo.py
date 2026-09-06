@@ -260,6 +260,7 @@ class ObservationRepo:
         observed_at: datetime,
         status: str = "active",
         schema_version: int = 1,
+        extraction_review_id: str | None = None,
     ) -> None:
         self._listing_repo.ensure_listing(
             listing_id,
@@ -276,9 +277,10 @@ class ObservationRepo:
                 origin,
                 confidence,
                 evidence,
-                observed_at
+                observed_at,
+                extraction_review_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 listing_id,
@@ -288,6 +290,7 @@ class ObservationRepo:
                 confidence,
                 evidence,
                 _isoformat(observed_at),
+                extraction_review_id,
             ),
         )
 
@@ -302,7 +305,17 @@ class ObservationRepo:
 
     def project_listing_fields(self, listing_id: str) -> dict[str, JSONValue]:
         query = f"""
-            WITH ranked AS (
+            WITH current_review AS (
+                SELECT er.preview_token
+                FROM extraction_review er
+                WHERE er.listing_id = ?
+                  AND er.applied_at IS NOT NULL
+                  AND er.superseded_at IS NULL
+                  AND er.source_record_id = (
+                      SELECT MAX(sr.id) FROM source_record sr WHERE sr.listing_id = er.listing_id
+                  )
+            ),
+            ranked AS (
                 SELECT
                     field,
                     value_json,
@@ -319,6 +332,14 @@ class ObservationRepo:
                     ) AS row_number
                 FROM observation
                 WHERE listing_id = ?
+                  AND (
+                      origin IN ('user', 'geo_provider')
+                      OR extraction_review_id = (SELECT preview_token FROM current_review)
+                      OR (
+                          NOT EXISTS (SELECT 1 FROM current_review)
+                          AND extraction_review_id IS NULL
+                      )
+                  )
             )
             SELECT field, value_json, origin, confidence, evidence, observed_at
             FROM ranked
@@ -326,7 +347,7 @@ class ObservationRepo:
             ORDER BY field
         """
 
-        rows = self._conn.execute(query, (listing_id,)).fetchall()
+        rows = self._conn.execute(query, (listing_id, listing_id)).fetchall()
         projected: dict[str, JSONValue] = {}
 
         for row in rows:

@@ -116,7 +116,7 @@ def test_laundry_negation_counts_as_in_suite_and_blocks_building_signal() -> Non
 
     assert in_suite is not None
     assert in_suite.fired is True
-    assert in_suite.evidence == "No shared laundry"
+    assert in_suite.evidence == "private laundry"
     assert in_suite.magnitude == pytest.approx(1.0)
     assert building is None
 
@@ -134,15 +134,12 @@ def test_shared_laundry_phrase_fires_building_detector() -> None:
     assert in_suite is None
 
 
-def test_floor_detector_infers_floor_from_unit_number_marker() -> None:
+def test_floor_detector_does_not_infer_floor_from_unit_number_marker() -> None:
     listing = _make_listing(title="#1408 - 938 Smithe St")
 
     floor = _detect("floor.low", listing)
 
-    assert floor is not None
-    assert floor.fired is True
-    assert floor.evidence == "#1408"
-    assert floor.magnitude == pytest.approx(14.0)
+    assert floor is None
 
 
 def test_floor_detector_does_not_treat_street_number_as_unit_number() -> None:

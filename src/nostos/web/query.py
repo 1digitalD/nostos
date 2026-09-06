@@ -24,6 +24,7 @@ from nostos.corrections import (
     load_user_corrections,
 )
 from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.review import load_current_extraction_revision
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import Area, Listing, Money, Observed, Photo, SourceRecord
 from nostos.model.source_record import JSONValue
@@ -143,6 +144,7 @@ class ListRow:
     first_seen: datetime | None
     photos: tuple[Photo, ...]
     listing: Listing
+    extraction_current: bool = False
     matched_filtered: bool = field(default=True)
     # Extra decision factors surfaced as a facts row in the UI. Parsers fill
     # these when the listing states them; otherwise None means "unstated".
@@ -279,6 +281,9 @@ def query_list(
             dismissed=listing_id in dismissed_ids,
             breakdown=breakdowns_by_id.get(listing_id),
             area_labels=area_labels,
+            extraction_current=load_current_extraction_revision(
+                conn, listing_id=listing_id
+            ) is not None,
         )
         if _passes_filter(row, filters):
             prepared.append(row)
@@ -305,7 +310,8 @@ def _listing_from_record(
     context: SearchContext,
     correction_rows: Iterable[Mapping[str, object]] | None = None,
 ) -> Listing:
-    listing = source_obj.to_listing(record, context)
+    current = load_current_extraction_revision(conn, listing_id=listing_id)
+    listing = current.machine_listing if current else source_obj.to_listing(record, context)
     # Re-key to the canonical listing_id (post cross-source dedupe).
     if listing.identity.listing_id != listing_id:
         listing = listing.model_copy(
@@ -320,7 +326,7 @@ def _listing_from_record(
     )
     # Run the same text enrichment the scorer runs so the facts row (floor,
     # parking, laundry...) and the match status agree with the stored score.
-    return run_enricher_chain(listing, _WEB_ENRICHERS, context)
+    return listing if current else run_enricher_chain(listing, _WEB_ENRICHERS, context)
 
 
 def _action_listing_ids(
@@ -451,6 +457,7 @@ def _build_list_row(
     dismissed: bool = False,
     breakdown: Mapping[str, object] | None = None,
     area_labels: Mapping[str, str] | None = None,
+    extraction_current: bool = False,
 ) -> ListRow:
     title = _listing_title(listing)
     rent_text = rent_display(listing)
@@ -465,7 +472,12 @@ def _build_list_row(
     floor_text = _field_text(listing.floor)
     furnished = _field_text(listing.furnishing)
     parking = _field_text(listing.parking)
-    available = _attribute_text(listing, "available") or _attribute_text(listing, "avail")
+    available = (
+        _attribute_text(listing, "available_date")
+        or _attribute_text(listing, "available_text")
+        or _attribute_text(listing, "available")
+        or _attribute_text(listing, "avail")
+    )
     category_scores = _category_scores_from_breakdown(breakdown)
     if context is not None:
         classified = classify_match_status(listing, context.profile)
@@ -499,7 +511,8 @@ def _build_list_row(
         match_reasons=classified.reasons,
         starred=starred,
         dismissed=dismissed,
-        category_scores=category_scores,
+        category_scores=category_scores if extraction_current else (),
+        extraction_current=extraction_current,
     )
 
 
@@ -867,6 +880,9 @@ def load_detail(
         dismissed=listing_id in _action_listing_ids(conn, kind="dismiss", listing_ids=ids),
         breakdown=breakdown,
         area_labels=dict(known_areas(context)),
+        extraction_current=load_current_extraction_revision(
+            conn, listing_id=listing_id
+        ) is not None,
     )
 
 

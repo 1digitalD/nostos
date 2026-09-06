@@ -23,7 +23,7 @@
       <h1>{{ row.title or row.address or row.listing_id }}</h1>
       <p class="detail-address">{{ row.address or 'Address not stated' }}</p>
     </div>
-    <div class="detail-score-block"><span>Match score</span><strong>{{ '%.0f'|format(row.score) }}</strong><small>out of 100</small></div>
+    <div class="detail-score-block"><span>Match score</span>{% if row.extraction_current %}<strong>{{ '%.0f'|format(row.score) }}</strong><small>out of 100</small>{% else %}<strong>—</strong><small>Review extracted details</small>{% endif %}</div>
   </header>
 
   <div class="detail-vitals" aria-label="Listing summary">
@@ -46,6 +46,8 @@
     </div>
   {% endif %}
 
+  {% if extracted %}<p class="profile-banner profile-banner-ok" role="status">Extracted details applied. Facts and ranking are updated; your corrections are preserved.</p>{% endif %}
+
   <div class="detail-layout">
     <div class="detail-main">
       {% if row.photos %}
@@ -56,7 +58,8 @@
             </a>
           {% endfor %}
         </section>
-      {% else %}<div class="photo-empty">No listing photos available</div>{% endif %}
+        {% if row.photos|length > 5 %}<details class="source-description"><summary>View all {{ row.photos|length }} photos</summary><div class="remaining-photos">{% for photo in row.photos[5:] %}<a href="{{ photo.url }}" target="_blank" rel="noopener noreferrer"><img src="{{ photo.url }}" alt="{{ photo.caption or 'Additional listing photo' }}" loading="lazy"></a>{% endfor %}</div></details>{% endif %}
+      {% else %}<div class="photo-empty">No photos captured. Update listing details to check the source.</div>{% endif %}
 
       <section class="detail-section">
         <div class="section-heading">
@@ -70,8 +73,22 @@
           <div class="{{ 'is-missing' if not facts.furnished.present else '' }}"><dt>Furnished</dt><dd>{{ facts.furnished.value if facts.furnished.present else 'Unstated' }}</dd></div>
           <div class="{{ 'is-missing' if not facts.parking.present else '' }}"><dt>Parking</dt><dd>{{ facts.parking.value if facts.parking.present else 'Unstated' }}</dd></div>
           <div class="{{ 'is-missing' if not facts.available.present else '' }}"><dt>Available</dt><dd>{{ facts.available.value if facts.available.present else 'Unstated' }}</dd></div>
+          {% for fact in listing_evidence.facts %}
+          <div><dt>{{ fact.label }}</dt><dd>{{ fact.value }}{% if fact.evidence %}<details class="fact-evidence"><summary>Evidence</summary><p>{{ fact.evidence }}</p><small>{{ 'Your correction' if fact.origin == 'user' else 'Source claim' }}</small></details>{% endif %}</dd></div>
+          {% endfor %}
           <div><dt>Listing ID</dt><dd><code>{{ row.listing_id }}</code></dd></div>
         </dl>
+      </section>
+
+      <section class="detail-section extraction-section">
+        <div class="section-heading"><div><h2>Check extracted details</h2><p>Review what can be recovered from the saved listing text before applying changes.</p></div></div>
+        <div class="extraction-actions">{% if row.source != 'manual' %}<button type="button" class="btn btn-primary" id="refresh-details" data-listing="{{ row.listing_id }}">Update listing details</button>{% endif %}<a class="btn btn-secondary" href="/listings/{{ row.listing_id }}/extraction-review">Review extracted details</a></div>
+        {% if row.source == 'manual' %}<p>This manually added listing supports saved-content review and fact corrections.</p>{% else %}<p>Update fetches the source page and applies supported facts. Your corrections stay in place.</p>{% endif %}
+        <p id="refresh-details-status" role="status" aria-live="polite"></p>
+        <details class="source-description"><summary>Read saved listing description</summary>
+          {% if listing_evidence.source_attributes %}<p><strong>Listed features:</strong> {{ listing_evidence.source_attributes }}</p>{% endif %}
+          {% if listing_evidence.description %}<div class="listing-description">{{ listing_evidence.description }}</div>{% else %}<p>No description was captured. Open the original listing to check its details.</p>{% endif %}
+        </details>
       </section>
 
       {% if landmark %}
@@ -83,15 +100,16 @@
 
       <section class="detail-section">
         <div class="section-heading"><div><h2>Why it ranks here</h2><p>The strongest contributions from your current criteria.</p></div><a href="/profile">Edit ranking profile</a></div>
-        {% if category_scores %}
+        {% if not row.extraction_current %}<p>Saved ranking needs an extraction review to align it with the current facts.</p>{% endif %}
+        {% if row.extraction_current and category_scores %}
           <div class="category-ledger">{% for cat in category_scores %}<div class="category-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}"><span>{{ cat.label }}</span><div class="category-track"><span style="width: {{ cat.pct | round(1) }}%"></span></div><strong>{% if cat.score > 0 %}+{% endif %}{{ cat.score | round(1) }}</strong></div>{% endfor %}</div>
         {% endif %}
-        {% if rule_rows_fired %}
+        {% if row.extraction_current and rule_rows_fired %}
           <div class="rule-table-wrap"><table class="rule-table"><thead><tr><th scope="col">Rule</th><th scope="col">Evidence</th><th scope="col" class="num">Impact</th><th scope="col" class="num">Weight</th></tr></thead><tbody>
             {% for r in rule_rows_fired %}<tr class="rule-row {% if r.contribution >= 0 %}match{% else %}miss{% endif %}" data-rule="{{ r.rule_key }}"><td><span class="rule-name">{{ r.label }}</span><span class="rule-cat">{{ r.category_label }}</span></td><td class="rule-evidence">{{ r.evidence or 'No evidence recorded' }}</td><td class="num rule-contrib">{{ r.contribution_text }}</td><td class="num rule-weight">{{ r.weight_text }}</td></tr>{% endfor %}
           </tbody></table></div>
         {% endif %}
-        {% if rule_rows_idle %}<details class="rule-idle"><summary>Rules that didn't fire ({{ rule_rows_idle|length }})</summary><div class="rule-table-wrap"><table class="rule-table"><tbody>{% for r in rule_rows_idle %}<tr class="rule-row idle" data-rule="{{ r.rule_key }}"><td><span class="rule-name">{{ r.label }}</span><span class="rule-cat">{{ r.category_label }}</span></td><td class="rule-evidence">{{ r.evidence or 'Not stated' }}</td><td class="num">0</td><td class="num rule-weight">{{ r.weight_text }}</td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
+        {% if row.extraction_current and rule_rows_idle %}<details class="rule-idle"><summary>Rules that didn't fire ({{ rule_rows_idle|length }})</summary><div class="rule-table-wrap"><table class="rule-table"><tbody>{% for r in rule_rows_idle %}<tr class="rule-row idle" data-rule="{{ r.rule_key }}"><td><span class="rule-name">{{ r.label }}</span><span class="rule-cat">{{ r.category_label }}</span></td><td class="rule-evidence">{{ r.evidence or 'Not stated' }}</td><td class="num">0</td><td class="num rule-weight">{{ r.weight_text }}</td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
         <a class="text-link" href="/listings/{{ row.listing_id }}/explain.json">View raw ranking data</a>
       </section>
     </div>
@@ -118,6 +136,60 @@
 <script>
 (function () {
   var currentUrl = window.location.pathname + window.location.search;
+  var refreshButton = document.getElementById('refresh-details');
+  var refreshStatus = document.getElementById('refresh-details-status');
+  if (refreshButton && refreshStatus) {
+    var refreshUrl = '/listings/' + encodeURIComponent(refreshButton.dataset.listing) + '/detail-refresh';
+    async function showRefresh(job, remaining, reloadWhenDone) {
+      var active = job.state === 'queued' || job.state === 'running';
+      refreshButton.disabled = active;
+      if (active) {
+        refreshStatus.textContent = job.state === 'queued' ? 'Detail update queued…' : 'Fetching and assessing the source listing…';
+        if (remaining > 0) {
+          window.setTimeout(async function () {
+            try {
+              var response = await fetch(refreshUrl);
+              if (!response.ok) throw new Error();
+              await showRefresh(await response.json(), remaining - 1, reloadWhenDone);
+            } catch (_) {
+              refreshButton.disabled = false;
+              refreshStatus.textContent = 'Could not check progress. Reload this page to reconnect; the saved job is retained.';
+            }
+          }, 2000);
+        } else {
+          refreshStatus.textContent = 'The update is still pending. Reload this page to check progress.';
+        }
+      } else if (job.state === 'succeeded') {
+        if (reloadWhenDone) { window.location.assign(window.location.pathname + '?extracted=1'); return; }
+        refreshStatus.textContent = job.message || 'Latest detail update completed. Source claims still need verification.';
+      } else if (job.state === 'failed') {
+        refreshStatus.textContent = job.error || job.message || 'The source update could not complete. Previous saved details are retained. Try again or open the original listing.';
+      }
+    }
+    refreshButton.addEventListener('click', async function () {
+      refreshButton.disabled = true;
+      refreshStatus.textContent = 'Requesting a detail update…';
+      try {
+        var response = await fetch(refreshUrl, {method: 'POST'});
+        if (!response.ok) throw new Error();
+        await showRefresh(await response.json(), 90, true);
+      } catch (_) {
+        refreshButton.disabled = false;
+        refreshStatus.textContent = 'Could not request the update. Try again; your saved details are unchanged.';
+      }
+    });
+    fetch(refreshUrl).then(function (response) { return response.ok ? response.json() : {state: 'idle'}; })
+      .then(function (job) { showRefresh(job, 90, job.state === 'queued' || job.state === 'running'); })
+      .catch(function () {});
+  }
+  document.addEventListener('error', function (event) {
+    if (event.target.tagName === 'IMG' && event.target.closest('.photo-gallery, .remaining-photos')) {
+      var message = document.createElement('span');
+      message.className = 'unavailable-photo';
+      message.textContent = 'Photo unavailable from source';
+      event.target.replaceWith(message);
+    }
+  }, true);
   var feedback = document.getElementById('decision-feedback');
   document.addEventListener('click', async function (event) {
     const btn = event.target.closest('[data-action]'); if (!btn) return; event.preventDefault();

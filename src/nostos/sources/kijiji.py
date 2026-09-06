@@ -7,13 +7,19 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import cast
+from urllib.parse import urlparse
 
 import extruct
 from selectolax.parser import HTMLParser
 
 from nostos.context import SearchContext
 from nostos.enrich.location import point_from_html
-from nostos.enrich.text import infer_area_key_from_neighborhood_text, neighborhood_haystack
+from nostos.enrich.text import (
+    furnishing_from_text,
+    infer_area_key_from_neighborhood_text,
+    neighborhood_haystack,
+    parking_from_text,
+)
 from nostos.model import (
     Absence,
     Area,
@@ -33,12 +39,13 @@ FetchText = Callable[[str], str]
 NowProvider = Callable[[], datetime]
 
 _KIJIJI_ID_RE = re.compile(r"/(\d{9,10})(?:$|\?|#)")
-_PARKING_RE = re.compile(r"\b(parking|garage|stall)\b", flags=re.IGNORECASE)
 _ROOM_ONLY_RE = re.compile(
     r"\b(room for rent|shared (?:home|house|apartment|unit)|roommate)\b",
     flags=re.IGNORECASE,
 )
 _REQUEST_HEADERS = {"User-Agent": "nostos/0.1", "Accept-Language": "en-CA,en;q=0.9"}
+DETAIL_TEXT_MAX_BYTES = 100_000
+DETAIL_PHOTO_MAX = 50
 
 
 class KijijiSource:
@@ -81,27 +88,79 @@ class KijijiSource:
         return iter(discovered.values())
 
     def fetch_detail(self, rec: SourceRecord) -> SourceRecord:
+        fetched_at = self._now_provider()
+        existing_payload = _mapping_payload(rec.payload)
+        merged_payload = dict(existing_payload)
+
         try:
             html = self._fetcher(rec.url)
         except RobotsDisallowedError:
-            return rec
-        except Exception:
-            return rec
+            merged_payload["detail_status"] = "blocked"
+            merged_payload["detail_error"] = "source robots policy blocked the detail request"
+        except Exception as exc:
+            merged_payload["detail_status"] = "failed"
+            merged_payload["detail_error"] = _sanitized_fetch_error(exc)
+        else:
+            page_outcome = _detail_page_outcome(html)
+            if page_outcome is not None:
+                status, error = page_outcome
+                merged_payload["detail_status"] = status
+                merged_payload["detail_error"] = error
+            else:
+                try:
+                    detail_payload = _detail_payload(html=html, base_url=rec.url)
+                except Exception as exc:
+                    merged_payload["detail_status"] = "failed"
+                    merged_payload["detail_error"] = _sanitized_parse_error(exc)
+                else:
+                    canonical_url = _as_text(detail_payload.get("canonical_url"))
+                    if not _detail_identity_matches(rec, canonical_url):
+                        merged_payload["detail_status"] = "failed"
+                        merged_payload["detail_error"] = (
+                            "detail page identity did not match the requested listing"
+                        )
+                    elif not _has_listing_detail(detail_payload):
+                        merged_payload["detail_status"] = "failed"
+                        merged_payload["detail_error"] = (
+                            "detail page did not contain recognizable listing content"
+                        )
+                    else:
+                        point = point_from_html(html)
+                        if point:
+                            detail_payload["point"] = point
+                        merged_payload.update(
+                            {
+                                key: value
+                                for key, value in detail_payload.items()
+                                if _has_detail_value(value)
+                            }
+                        )
+                        partial = bool(
+                            not canonical_url
+                            or merged_payload.get("description_truncated")
+                            or merged_payload.get("photos_truncated")
+                        )
+                        merged_payload["detail_status"] = (
+                            "partial" if partial else "complete"
+                        )
+                        if not canonical_url:
+                            merged_payload["detail_error"] = (
+                                "canonical URL unavailable; source identity was not "
+                                "independently verified"
+                            )
+                        elif partial:
+                            merged_payload["detail_error"] = (
+                                "detail content was truncated at storage limits"
+                            )
+                        else:
+                            merged_payload.pop("detail_error", None)
 
-        detail_payload = _detail_payload(html=html, base_url=rec.url)
-        point = point_from_html(html)
-        if point:
-            detail_payload["point"] = point
-        if not detail_payload:
-            return rec
-        existing_payload = _mapping_payload(rec.payload)
-        merged_payload = {**existing_payload, **detail_payload}
         return SourceRecord(
             source=rec.source,
             source_id=rec.source_id,
             url=rec.url,
             content_hash=_content_hash(rec.source_id, rec.url, merged_payload),
-            fetched_at=self._now_provider(),
+            fetched_at=fetched_at,
             payload=merged_payload,
         )
 
@@ -109,6 +168,11 @@ class KijijiSource:
         payload = _mapping_payload(rec.payload)
         if bool(payload.get("removed")):
             return Liveness.FAILED
+        detail_status = _as_text(payload.get("detail_status"))
+        if detail_status == "removed":
+            return Liveness.FAILED
+        if detail_status in {"blocked", "failed"}:
+            return Liveness.DEGRADED
         if _as_text(payload.get("title")):
             return Liveness.OK
         return Liveness.DEGRADED
@@ -121,6 +185,12 @@ class KijijiSource:
         address = _as_text(payload.get("address"))
         price = _as_int(payload.get("price"))
         area_key = _infer_area_key(payload, ctx)
+        parking_fact = parking_from_text(
+            " ".join(part for part in (title, description) if part)
+        )
+        furnishing_fact = furnishing_from_text(
+            " ".join(part for part in (title, description) if part)
+        )
 
         place = Place.model_validate(
             {
@@ -191,8 +261,8 @@ class KijijiSource:
                 observed_at=observed_at,
             ),
             floor=Absence.NOT_STATED,
-            parking=_parking_field(payload.get("parking"), observed_at),
-            furnishing=_furnishing_field(payload.get("furnishing"), observed_at),
+            parking=_parking_field(parking_fact, observed_at),
+            furnishing=_furnishing_field(furnishing_fact, observed_at),
             photos=photos,
             attributes=attributes,
             raw_ref=rec.to_ref(),
@@ -291,34 +361,33 @@ def _records_from_item_list(
 
 def _item_payload(item: Mapping[str, object]) -> dict[str, object]:
     title = _to_plain_text(item.get("name"))
-    description = _to_plain_text(item.get("description"))
+    raw_description = _to_plain_text(item.get("description"))
+    description, description_truncated = _bounded_utf8_text(raw_description)
     address = _address_text(item.get("address"))
     haystack = " ".join(token for token in (title, description, address) if token)
     offers = _mapping_or_none(item.get("offers"))
     floor_size = _mapping_or_none(item.get("floorSize"))
-    images = _image_urls(item.get("image"))
+    all_images = _image_urls(item.get("image"))
+    images = all_images[:DETAIL_PHOTO_MAX]
+    parking_fact = parking_from_text(haystack)
 
-    furnishing: str | None
-    lowered = haystack.lower()
-    if "unfurnished" in lowered:
-        furnishing = "unfurnished"
-    elif "furnished" in lowered:
-        furnishing = "furnished"
-    else:
-        furnishing = None
+    furnishing_fact = furnishing_from_text(haystack)
+    furnishing = furnishing_fact[0].lower() if furnishing_fact is not None else None
 
     return {
         "title": title,
         "description": description,
+        "description_truncated": description_truncated,
         "address": address,
         "price": _as_int(offers.get("price") if offers else None),
         "beds": _as_float(item.get("numberOfBedrooms")),
         "baths": _as_float(item.get("numberOfBathroomsTotal")),
         "area_sqft": _as_int(floor_size.get("value") if floor_size else None),
         "photos": images,
-        "parking": bool(_PARKING_RE.search(haystack)),
+        "photos_truncated": len(all_images) > DETAIL_PHOTO_MAX,
+        "parking": parking_fact[0] if parking_fact is not None else None,
         "furnishing": furnishing,
-        "full_unit": not bool(_ROOM_ONLY_RE.search(haystack)),
+        "full_unit": not bool(_ROOM_ONLY_RE.search(haystack)) if haystack else None,
     }
 
 
@@ -333,13 +402,19 @@ def _detail_payload(*, html: str, base_url: str) -> dict[str, object]:
         detail_payload = _item_payload(listing_node)
 
     parser = HTMLParser(html)
+    canonical_url = _link_href(parser, rel="canonical")
     og_title = _meta_content(parser, property_name="og:title")
     og_image = _meta_content(parser, property_name="og:image")
+    og_url = _meta_content(parser, property_name="og:url")
 
     if og_title:
         detail_payload["title"] = og_title
     if og_image and not _image_urls(detail_payload.get("photos")):
         detail_payload["photos"] = [og_image]
+    listing_url = _as_text(listing_node.get("url")) if listing_node is not None else None
+    resolved_url = canonical_url or og_url or listing_url
+    if resolved_url:
+        detail_payload["canonical_url"] = resolved_url
     return detail_payload
 
 
@@ -387,6 +462,14 @@ def _meta_content(parser: HTMLParser, *, property_name: str) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _link_href(parser: HTMLParser, *, rel: str) -> str | None:
+    node = parser.css_first(f'link[rel="{rel}"]')
+    if node is None:
+        return None
+    value = node.attributes.get("href")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _address_text(raw_value: object) -> str | None:
     mapping = _mapping_or_none(raw_value)
     if mapping is not None:
@@ -401,16 +484,108 @@ def _address_text(raw_value: object) -> str | None:
 
 
 def _image_urls(raw_value: object) -> list[str]:
+    candidates: list[str] = []
     if isinstance(raw_value, str):
-        text = raw_value.strip()
-        return [text] if text else []
-    if isinstance(raw_value, Sequence):
-        urls: list[str] = []
+        candidates.append(raw_value)
+    elif isinstance(raw_value, Mapping):
+        preferred = _as_text(raw_value.get("contentUrl")) or _as_text(raw_value.get("url"))
+        if preferred:
+            candidates.append(preferred)
+    elif isinstance(raw_value, Sequence):
         for item in raw_value:
-            if isinstance(item, str) and item.strip():
-                urls.append(item.strip())
-        return urls
-    return []
+            candidates.extend(_image_urls(item))
+
+    deduped: dict[str, None] = {}
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if normalized and _is_http_url(normalized):
+            deduped.setdefault(normalized, None)
+    return list(deduped)
+
+
+def _bounded_utf8_text(text: str | None) -> tuple[str | None, bool]:
+    if text is None:
+        return None, False
+    encoded = text.encode("utf-8")
+    if len(encoded) <= DETAIL_TEXT_MAX_BYTES:
+        return text, False
+    bounded = encoded[:DETAIL_TEXT_MAX_BYTES].decode("utf-8", errors="ignore")
+    return bounded, True
+
+
+def _detail_identity_matches(rec: SourceRecord, canonical_url: str | None) -> bool:
+    requested_match = _KIJIJI_ID_RE.search(rec.url)
+    if rec.source != "kijiji" or not requested_match or requested_match.group(1) != rec.source_id:
+        return False
+    if not canonical_url:
+        return True
+    hostname = urlparse(canonical_url).hostname
+    if not hostname or not hostname.endswith("kijiji.ca"):
+        return False
+    match = _KIJIJI_ID_RE.search(canonical_url)
+    return bool(match and match.group(1) == rec.source_id)
+
+
+def _detail_page_outcome(html: str) -> tuple[str, str] | None:
+    normalized = _visible_page_text(html)
+    if any(
+        marker in normalized
+        for marker in (
+            "this ad is no longer available",
+            "the ad you are looking for is no longer available",
+            "this listing is no longer available",
+        )
+    ):
+        return "removed", "listing is no longer available"
+    if any(
+        marker in normalized
+        for marker in (
+            "verify you are human",
+            "pardon our interruption",
+            "access denied",
+            "captcha",
+        )
+    ):
+        return "blocked", "source challenge blocked the detail request"
+    return None
+
+
+def _visible_page_text(html: str) -> str:
+    parser = HTMLParser(html)
+    for hidden in parser.css("script, style, noscript"):
+        hidden.decompose()
+    body = parser.body
+    if body is None:
+        return ""
+    return " ".join(body.text(separator=" ", strip=True).lower().split())
+
+
+def _has_detail_value(value: object) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _has_listing_detail(detail: Mapping[str, object]) -> bool:
+    return any(
+        _has_detail_value(detail.get(key))
+        for key in ("description", "photos", "price", "address", "beds", "baths", "area_sqft")
+    )
+
+
+def _sanitized_fetch_error(exc: Exception) -> str:
+    return f"detail fetch failed ({type(exc).__name__})"
+
+
+def _sanitized_parse_error(exc: Exception) -> str:
+    return f"detail parse failed ({type(exc).__name__})"
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _clean_listing_title(title: str) -> str:
@@ -494,32 +669,34 @@ def _area_field(*, value: object, unit: str, observed_at: datetime) -> Observed[
     )
 
 
-def _parking_field(value: object, observed_at: datetime) -> Observed[str] | Absence:
-    if not isinstance(value, bool):
+def _parking_field(
+    fact: tuple[str, str] | None,
+    observed_at: datetime,
+) -> Observed[str] | Absence:
+    if fact is None:
         return Absence.NOT_STATED
-    if not value:
-        return Absence.NOT_STATED
+    value, evidence = fact
     return Observed[str](
-        value="available",
-        origin=Origin.SOURCE_FIELD,
-        confidence=0.9,
-        evidence="parking keyword",
+        value=value,
+        origin=Origin.TEXT_RULE,
+        confidence=0.8,
+        evidence=evidence,
         observed_at=observed_at,
     )
 
 
-def _furnishing_field(value: object, observed_at: datetime) -> Observed[str] | Absence:
-    text = _as_text(value)
-    if text is None:
+def _furnishing_field(
+    fact: tuple[str, str] | None,
+    observed_at: datetime,
+) -> Observed[str] | Absence:
+    if fact is None:
         return Absence.NOT_STATED
-    normalized = text.strip().lower()
-    if normalized not in {"furnished", "unfurnished"}:
-        return Absence.NOT_STATED
+    value, evidence = fact
     return Observed[str](
-        value=normalized,
-        origin=Origin.SOURCE_FIELD,
-        confidence=0.9,
-        evidence="furnishing keyword",
+        value=value.lower(),
+        origin=Origin.TEXT_RULE,
+        confidence=0.8,
+        evidence=evidence,
         observed_at=observed_at,
     )
 
@@ -583,11 +760,12 @@ def _as_float(value: object) -> float | None:
     text = _as_text(value)
     if text is None:
         return None
-    normalized = re.sub(r"[^0-9.]+", "", text)
-    if not normalized:
+    normalized = text.replace(",", "")
+    numeric_tokens = re.findall(r"\d+(?:\.\d+)?", normalized)
+    if len(numeric_tokens) != 1:
         return None
     try:
-        return float(normalized)
+        return float(numeric_tokens[0])
     except ValueError:
         return None
 

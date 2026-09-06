@@ -15,11 +15,11 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
-from nostos.model.source_record import SourceRecord
+from nostos.model.source_record import JSONValue, SourceRecord
 from nostos.sources.craigslist import CraigslistSource
 from nostos.store.actions import ActionRepo
 from nostos.store.db import apply_migrations, connect
@@ -202,6 +202,21 @@ def _seed_listing(
         )
 
 
+def _apply_saved_review(client: TestClient, listing_id: str) -> None:
+    """Mark a seeded listing's saved evidence as reviewed before ranking assertions."""
+
+    preview = client.get(f"/listings/{listing_id}/extraction-review")
+    assert preview.status_code == 200, preview.text
+    token = re.search(r'name="token" value="([^"]+)"', preview.text)
+    assert token is not None
+    applied = client.post(
+        f"/listings/{listing_id}/extraction-review",
+        data={"token": token.group(1)},
+        follow_redirects=False,
+    )
+    assert applied.status_code == 303, applied.text
+
+
 def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     db_path, profile_path, citypack_path = _seed_profile_and_citypack(tmp_path)
     profile_id_str = profile_path.stem
@@ -224,14 +239,22 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     assert "card is-starred" not in body
     assert "action-btn is-on" not in body
 
-    # Detail page renders score, address, action buttons, no badges yet.
+    # Before saved evidence is reviewed, the stored legacy score is not shown
+    # as a current ranking result.
     resp = client.get(f"/listings/{listing_id}")
     assert resp.status_code == 200
     body = resp.text
     assert "Sunny 2BR in Kitsilano" in body
     assert "1234 West 4th Ave, Kitsilano" in body
     assert "detail-score-block" in body
-    assert "82" in body
+    assert re.search(r'detail-score-block.*?<strong>—</strong>', body, re.S)
+    assert "Review extracted details" in body
+
+    # Review the saved source through the normal UI, then the detail page has
+    # a current score and the action controls remain available.
+    _apply_saved_review(client, listing_id)
+    body = client.get(f"/listings/{listing_id}").text
+    assert re.search(r'detail-score-block.*?<strong>\d+</strong>', body, re.S)
     # One-click actions are wired via data-action, not form actions.
     assert 'data-action="star"' in body
     assert 'data-listing="' in body
@@ -598,6 +621,17 @@ def test_card_shows_score_badge_and_top_contributors(tmp_path: Path) -> None:
         ],
     }
     _seed_listing(db_path, profile_id, "craigslist:seed-1", breakdown=breakdown)
+    _apply_saved_review(client, "craigslist:seed-1")
+    # Keep this test's hand-built breakdown as a presentation fixture while
+    # retaining the reviewed-state gate exercised above.
+    with connect(db_path) as conn:
+        ScoreRepo(conn).upsert_score(
+            listing_id="craigslist:seed-1",
+            profile_id=profile_id,
+            score=82.5,
+            breakdown_json=cast(dict[str, JSONValue], breakdown),
+            computed_at=datetime.now(UTC),
+        )
     body = client.get("/").text
     assert '<span class="score score-good">82.5</span>' in body
     assert "−10 pet friendly" in body
@@ -634,6 +668,17 @@ def test_detail_renders_rule_table_and_reasons(tmp_path: Path) -> None:
     # Rent over max + floor unstated -> miss with two reasons.
     _seed_listing(db_path, profile_id, "craigslist:seed-1", payload={"price": 3500},
                   score=40.0, breakdown=breakdown)
+    _apply_saved_review(client, "craigslist:seed-1")
+    # This test supplies a deterministic breakdown to verify table ordering
+    # and formatting after the listing has a current extraction revision.
+    with connect(db_path) as conn:
+        ScoreRepo(conn).upsert_score(
+            listing_id="craigslist:seed-1",
+            profile_id=profile_id,
+            score=40.0,
+            breakdown_json=cast(dict[str, JSONValue], breakdown),
+            computed_at=datetime.now(UTC),
+        )
     body = client.get("/listings/craigslist:seed-1").text
     assert "Miss" in body
     assert "<li>rent $3,500 &gt; max $3,200</li>" in body

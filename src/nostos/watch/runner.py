@@ -16,10 +16,17 @@ from pydantic import BaseModel
 
 from nostos.context import SearchContext, SourceScanState
 from nostos.enrich.base import Enricher
+from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.refresh import enqueue_refresh
+from nostos.enrich.review import (
+    apply_extraction_revision,
+    load_current_extraction_revision,
+    preview_extraction_revision,
+)
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import JSONValue, Listing, Observed, SourceRecord
 from nostos.rank.engine import RankEngine, RuleContribution, ScoreResult
-from nostos.rank.profile_scoring import score_listing_for_profile
+from nostos.rank.profile_scoring import passes_hard_filters
 from nostos.sources.base import Liveness, Source
 from nostos.store.repo import ListingRepo, ObservationRepo, RunRepo, ScoreRepo
 from nostos.watch.health import (
@@ -60,6 +67,7 @@ class _PersistableListing:
     source_name: str
     record: SourceRecord
     listing: Listing
+    discovery_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +108,7 @@ def run_watch(
     now: Callable[[], datetime] | None = None,
     max_workers: int | None = None,
     health_policy: HealthPolicy | None = None,
+    queue_details: bool = False,
 ) -> WatchRunReport:
     now_fn = now or _utc_now
     run_identifier = run_id or _next_run_id(run_id_factory)
@@ -139,6 +148,7 @@ def run_watch(
         sources=source_list,
         source_metadata=source_metadata,
         max_workers=max_workers,
+        queue_details=queue_details,
     )
 
     health_inputs = tuple(
@@ -169,13 +179,25 @@ def run_watch(
     )
     persistable = _canonicalize_listings(conn=conn, listings=persistable)
     new_listing_ids = _persist_stage(conn=conn, listings=persistable)
+    deferred = tuple(item for item in persistable if item.discovery_only)
+    synchronous = tuple(item for item in persistable if not item.discovery_only)
+    for listing_id in dict.fromkeys(item.listing.identity.listing_id for item in deferred):
+        enqueue_refresh(conn, listing_id=listing_id)
 
     active_enrichers = tuple(enrichers or (TextRuleEnricher(),))
+    _publish_saved_extraction_revisions(
+        conn=conn,
+        context=context,
+        listings=synchronous,
+        sources={source.name: source for source in source_list},
+        enrichers=active_enrichers,
+        profile_id=profile_id,
+    )
     engine = rank_engine or RankEngine(context.profile)
     scored = _score_stage(
         conn=conn,
         context=context,
-        listings=persistable,
+        listings=synchronous,
         enrichers=active_enrichers,
         rank_engine=engine,
         profile_id=profile_id,
@@ -229,6 +251,7 @@ def _collect_sources(
     sources: tuple[Source, ...],
     source_metadata: Mapping[str, dict[str, Any]],
     max_workers: int | None,
+    queue_details: bool,
 ) -> tuple[_SourceSnapshot, ...]:
     del source_metadata
     if not sources:
@@ -237,14 +260,22 @@ def _collect_sources(
     worker_count = max_workers or min(8, len(sources))
     snapshots: list[_SourceSnapshot] = []
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {
-            executor.submit(
-                _collect_source_snapshot,
-                source=source,
-                context=context,
-            ): source
-            for source in sources
-        }
+        futures = {}
+        for source in sources:
+            if queue_details and source.capabilities.supports_detail_fetch:
+                future = executor.submit(
+                    _collect_source_snapshot,
+                    source=source,
+                    context=context,
+                    defer_details=True,
+                )
+            else:
+                future = executor.submit(
+                    _collect_source_snapshot,
+                    source=source,
+                    context=context,
+                )
+            futures[future] = source
         for future in as_completed(futures):
             source = futures[future]
             try:
@@ -266,7 +297,9 @@ def _collect_sources(
     return tuple(snapshots)
 
 
-def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _SourceSnapshot:
+def _collect_source_snapshot(
+    *, source: Source, context: SearchContext, defer_details: bool = False
+) -> _SourceSnapshot:
     try:
         discovered = list(source.discover(context))
     except Exception as exc:  # noqa: BLE001 - isolate source-level failures
@@ -291,19 +324,33 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
     for record in discovered:
         if max_fetched_at is None or record.fetched_at > max_fetched_at:
             max_fetched_at = record.fetched_at
-        if _should_skip_detail_fetch(
+        if not defer_details and _should_skip_detail_fetch(
             record=record,
             seen_source_ids=source_scan_state.seen_source_ids,
         ):
             skipped_records += 1
             continue
 
-        try:
-            detailed = source.fetch_detail(record)
-        except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
-            status = _merge_status(status, Liveness.DEGRADED.value)
-            source_error = str(exc)
-            continue
+        if defer_details:
+            detailed = record
+        else:
+            try:
+                detailed = source.fetch_detail(record)
+            except Exception as exc:  # noqa: BLE001 - isolate per-listing failures
+                status = _merge_status(status, Liveness.DEGRADED.value)
+                source_error = str(exc)
+                continue
+            detail_status = _source_detail_status(detailed)
+            if detail_status in {"failed", "blocked", "removed"}:
+                failed_liveness = (
+                    Liveness.FAILED.value
+                    if detail_status == "removed"
+                    else Liveness.DEGRADED.value
+                )
+                status = _merge_status(status, failed_liveness)
+                if isinstance(detailed.payload, Mapping):
+                    source_error = _coerce_str(detailed.payload.get("detail_error")) or None
+                continue
 
         try:
             liveness = source.check_liveness(detailed).value
@@ -323,6 +370,7 @@ def _collect_source_snapshot(*, source: Source, context: SearchContext) -> _Sour
                 source_name=source.name,
                 record=detailed,
                 listing=listing,
+                discovery_only=defer_details,
             )
         )
 
@@ -375,6 +423,7 @@ def _canonicalize_listings(
 
     signatures = tuple({item.listing.identity.signature for item in listings})
     claims = _existing_canonical_by_signature(conn=conn, signatures=signatures)
+    exact_claims = _existing_canonical_by_source_identity(conn, listings)
     strong_claims = _existing_canonical_by_unit_fingerprint(conn)
 
     canonicalized: list[_PersistableListing] = []
@@ -395,7 +444,10 @@ def _canonicalize_listings(
             and posted != unit_claim[1]
         }
         claim = claims.get(signature)
-        if len(strong_ids) == 1:
+        exact_id = exact_claims.get((own_source, identity.source_id))
+        if exact_id is not None:
+            canonical_id = exact_id
+        elif len(strong_ids) == 1:
             canonical_id = next(iter(strong_ids))
         elif claim is not None and own_source not in claim[1]:
             canonical_id = claim[0]
@@ -422,6 +474,22 @@ def _canonicalize_listings(
         canonicalized.append(replace(item, listing=remapped_listing))
 
     return tuple(canonicalized)
+
+
+def _existing_canonical_by_source_identity(
+    conn: sqlite3.Connection, listings: tuple[_PersistableListing, ...]
+) -> dict[tuple[str, str], str]:
+    pairs = {(item.listing.identity.source, item.listing.identity.source_id) for item in listings}
+    if not pairs:
+        return {}
+    rows = conn.execute(
+        "SELECT listing_id,source,source_id FROM listing_source"
+    ).fetchall()
+    return {
+        (str(row["source"]), str(row["source_id"])): str(row["listing_id"])
+        for row in rows
+        if (str(row["source"]), str(row["source_id"])) in pairs
+    }
 
 
 def _unit_fingerprints(source: str, payload: JSONValue) -> set[_UnitFingerprint]:
@@ -556,6 +624,20 @@ def _persist_stage(
     with conn:
         for item in listings:
             listing_id = item.listing.identity.listing_id
+            if item.discovery_only:
+                existing_source = conn.execute(
+                    """
+                    SELECT 1 FROM listing_source
+                    WHERE listing_id=? AND source=? AND source_id=?
+                    """,
+                    (
+                        listing_id,
+                        item.listing.identity.source,
+                        item.listing.identity.source_id,
+                    ),
+                ).fetchone()
+                if existing_source is not None:
+                    continue
             if listing_id not in existing_ids:
                 seen_new_ids.add(listing_id)
             listing_repo.upsert_listing_source(
@@ -581,6 +663,39 @@ def _persist_stage(
     return seen_new_ids
 
 
+def _publish_saved_extraction_revisions(
+    *,
+    conn: sqlite3.Connection,
+    context: SearchContext,
+    listings: tuple[_PersistableListing, ...],
+    sources: Mapping[str, Source],
+    enrichers: tuple[Enricher, ...],
+    profile_id: str,
+) -> None:
+    """Publish the same saved-content snapshot consumed by browsing and re-score."""
+
+    seen: set[str] = set()
+    for item in reversed(listings):
+        listing_id = item.listing.identity.listing_id
+        if listing_id in seen:
+            continue
+        seen.add(listing_id)
+        preview = preview_extraction_revision(
+            conn,
+            listing_id=listing_id,
+            context=context,
+            profile_id=profile_id,
+            sources=sources,
+            enrichers=enrichers,
+        )
+        apply_extraction_revision(
+            conn,
+            listing_id=listing_id,
+            preview_token=preview.preview_token,
+            context=context,
+        )
+
+
 def _score_stage(
     *,
     conn: sqlite3.Connection,
@@ -597,33 +712,33 @@ def _score_stage(
 
     with conn:
         for item in listings:
-            scored_listing = score_listing_for_profile(
-                item.listing,
-                context=context,
-                enrichers=enrichers,
-                rank_engine=rank_engine,
-            )
-            if scored_listing is None:
-                conn.execute("DELETE FROM score WHERE listing_id=? AND profile_id=?",
-                             (item.listing.identity.listing_id, profile_id))
-                continue
-            updated_listing = scored_listing.listing
+            updated_listing = run_enricher_chain(item.listing, enrichers, context)
             before = _observed_fields(item.listing)
             after = _observed_fields(updated_listing)
-            for field_name, observed in after.items():
-                if before.get(field_name) == observed:
-                    continue
-                observation_repo.record_observation(
-                    listing_id=updated_listing.identity.listing_id,
-                    field=field_name,
-                    value_json=_json_ready(observed.value),
-                    origin=observed.origin,
-                    confidence=observed.confidence,
-                    evidence=observed.evidence,
-                    observed_at=observed.observed_at,
-                    schema_version=updated_listing.schema_version,
+            current = load_current_extraction_revision(
+                conn, listing_id=updated_listing.identity.listing_id
+            )
+            if current is None:
+                for field_name, observed in after.items():
+                    if before.get(field_name) == observed:
+                        continue
+                    observation_repo.record_observation(
+                        listing_id=updated_listing.identity.listing_id,
+                        field=field_name,
+                        value_json=_json_ready(observed.value),
+                        origin=observed.origin,
+                        confidence=observed.confidence,
+                        evidence=observed.evidence,
+                        observed_at=observed.observed_at,
+                        schema_version=updated_listing.schema_version,
+                    )
+            if not passes_hard_filters(updated_listing, context.profile):
+                conn.execute(
+                    "DELETE FROM score WHERE listing_id=? AND profile_id=?",
+                    (item.listing.identity.listing_id, profile_id),
                 )
-            result = scored_listing.result
+                continue
+            result = rank_engine.score_listing(updated_listing, context=context)
             score_repo.upsert_score(
                 listing_id=updated_listing.identity.listing_id,
                 profile_id=profile_id,
@@ -806,6 +921,12 @@ def _should_skip_detail_fetch(*, record: SourceRecord, seen_source_ids: frozense
     if not isinstance(payload, Mapping):
         return False
     return _coerce_str(payload.get("posted")) == ""
+
+
+def _source_detail_status(record: SourceRecord) -> str:
+    if not isinstance(record.payload, Mapping):
+        return ""
+    return _coerce_str(record.payload.get("detail_status")).lower()
 
 
 def _prefiltered_record_count(source: Source) -> int:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +25,12 @@ from nostos.config.profile import Profile, ScaledWeight
 from nostos.config.wizard import dump_profile_yaml
 from nostos.context import SearchContext, load_search_context
 from nostos.enrich.location import directions_url, distance_km, walking_route
+from nostos.enrich.review import (
+    ExtractionPreviewNotFound,
+    StaleExtractionPreview,
+    apply_extraction_revision,
+    preview_extraction_revision,
+)
 from nostos.model import Observed, Origin
 from nostos.rank import rules as rules_module
 from nostos.rank.rescore import RescoreReport, rescore_profile
@@ -118,6 +127,7 @@ def _build_templates() -> Jinja2Templates:
     templates.env.filters["relativetime"] = _render_relative_time
     templates.env.filters["score_badge"] = _render_score_badge
     templates.env.filters["money_short"] = _render_money_short
+    templates.env.filters["fact_value"] = _render_fact_value
     return templates
 
 
@@ -429,6 +439,7 @@ def create_app(
     profile_path: Path,
     citypack_path: Path,
     research_provider: ResearchProvider | None = None,
+    enable_detail_worker: bool = False,
 ) -> FastAPI:
     """Build the FastAPI app bound to a specific db/profile/citypack triple."""
 
@@ -439,7 +450,43 @@ def create_app(
         citypack_path=citypack_path,
         templates=templates,
     )
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        stop = threading.Event()
+        worker: threading.Thread | None = None
+        if enable_detail_worker:
+            def work() -> None:
+                from nostos.enrich.refresh import run_refresh_once
+                while not stop.is_set():
+                    try:
+                        context = load_search_context(
+                            citypack_path=state.citypack_path, profile_path=state.profile_path
+                        )
+                        ran = run_refresh_once(
+                            state.db_path, context=context, profile_id=state.profile_id,
+                            sources=state.sources,
+                            context_loader=lambda: load_search_context(
+                                citypack_path=state.citypack_path,
+                                profile_path=state.profile_path,
+                            ),
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).exception("Detail worker iteration failed")
+                        ran = False
+                    if not ran:
+                        stop.wait(2)
+            worker = threading.Thread(target=work, name="nostos-detail-worker", daemon=True)
+            worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if worker is not None:
+                worker.join(timeout=1)
+                # Any interrupted claim is recovered through its durable expiry.
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Nostos local web",
         docs_url=None,
         redoc_url=None,
@@ -550,6 +597,7 @@ def create_app(
         state: StateDep,
         error: str | None = None,
         corrected: bool = False,
+        extracted: bool = False,
     ) -> HTMLResponse:
         with state.connect() as conn:
             row = load_detail(
@@ -601,6 +649,8 @@ def create_app(
                 "corrections": corrections,
                 "correction_error": error,
                 "corrected": corrected,
+                "extracted": extracted,
+                "listing_evidence": _listing_evidence(row),
                 "landmark": landmark_context,
                 "breakdown": breakdown,
                 "breakdown_contributors": breakdown_contributors,
@@ -610,6 +660,69 @@ def create_app(
                 "profile_id": state.profile_id,
             },
         )
+
+    @app.post("/listings/{listing_id}/detail-refresh", response_class=JSONResponse)
+    def detail_refresh(listing_id: str, state: StateDep) -> JSONResponse:
+        from nostos.enrich.refresh import enqueue_refresh
+        try:
+            with state.connect() as conn:
+                record = conn.execute(
+                    "SELECT source FROM source_record WHERE listing_id=? ORDER BY id DESC LIMIT 1",
+                    (listing_id,),
+                ).fetchone()
+                source = state.sources.get(str(record["source"])) if record else None
+                if source is not None and not source.capabilities.supports_detail_fetch:
+                    raise HTTPException(
+                        status_code=422, detail="This source supports saved-content review only."
+                    )
+                job = enqueue_refresh(conn, listing_id=listing_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(job, status_code=202)
+
+    @app.get("/listings/{listing_id}/detail-refresh", response_class=JSONResponse)
+    def detail_refresh_status(listing_id: str, state: StateDep) -> JSONResponse:
+        from nostos.enrich.refresh import get_refresh_job
+        with state.connect() as conn:
+            job = get_refresh_job(conn, listing_id=listing_id)
+        return JSONResponse(job or {"state": "idle"})
+
+    @app.get("/listings/{listing_id}/extraction-review", response_class=HTMLResponse)
+    def extraction_review(listing_id: str, request: Request, state: StateDep) -> HTMLResponse:
+        state.reload()
+        try:
+            with state.connect() as conn:
+                preview = preview_extraction_revision(
+                    conn, listing_id=listing_id, context=state.context,
+                    profile_id=state.profile_id, sources=state.sources,
+                )
+        except (ExtractionPreviewNotFound, ValueError) as exc:
+            raise HTTPException(
+                status_code=404, detail="Saved listing evidence is unavailable"
+            ) from exc
+        return state.templates.TemplateResponse(
+            request=request, name="extraction_review.html",
+            context={"preview": preview, "profile_id": state.profile_id},
+        )
+
+    @app.post("/listings/{listing_id}/extraction-review", response_class=HTMLResponse)
+    def extraction_apply(
+        listing_id: str, request: Request, state: StateDep,
+        token: Annotated[str, Form(...)],
+    ) -> Response:
+        state.reload()
+        try:
+            with state.connect() as conn:
+                apply_extraction_revision(
+                    conn, listing_id=listing_id, preview_token=token, context=state.context,
+                )
+        except (StaleExtractionPreview, ExtractionPreviewNotFound, ValueError):
+            return state.templates.TemplateResponse(
+                request=request, name="extraction_review.html", status_code=409,
+                context={"preview": None, "listing_id": listing_id,
+                         "profile_id": state.profile_id},
+            )
+        return RedirectResponse(url=f"/listings/{listing_id}?extracted=1", status_code=303)
 
     @app.post("/listings/{listing_id}/star")
     def star_action(listing_id: str, state: StateDep) -> RedirectResponse:
@@ -1161,6 +1274,55 @@ def _active_filters(filters: ListFilter) -> dict[str, object]:
     return pairs
 
 
+def _render_fact_value(value: Any) -> str:
+    if value is None or value == "not_stated":
+        return "Unstated"
+    if value == "contradictory":
+        return "Conflicting evidence"
+    if value == "not_applicable":
+        return "Not applicable"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, list):
+        return ", ".join(str(item).replace("_", " ") for item in value)
+    if isinstance(value, dict):
+        if "amount" in value:
+            return f"{value['amount']} {value.get('currency', '')} / {value.get('period', 'month')}"
+        if "value" in value and "unit" in value:
+            return f"{value['value']} {value['unit']}"
+    return str(value)
+
+
+def _listing_evidence(row: ListRow) -> dict[str, Any]:
+    attributes = row.listing.attributes
+    description = attributes.get("description")
+    source_attributes = attributes.get("source_attributes")
+    facts: list[dict[str, Any]] = []
+    for key, label in (
+        ("in_suite_laundry", "In-suite laundry"),
+        ("building_laundry", "Shared building laundry"),
+        ("lease_months", "Lease length (months)"),
+        ("total_monthly", "Total monthly cost"),
+        ("utilities_included", "Utilities included"),
+        ("pet_policy", "Pets"),
+    ):
+        item = attributes.get(key)
+        if isinstance(item, Observed):
+            value = _render_fact_value(item.value)
+            facts.append({"label": label, "value": value, "evidence": item.evidence,
+                          "origin": item.origin.value})
+        else:
+            facts.append({"label": label, "value": "Unstated", "evidence": None,
+                          "origin": None})
+    return {
+        "description": description.value if isinstance(description, Observed) else "",
+        "source_attributes": (
+            source_attributes.value if isinstance(source_attributes, Observed) else ""
+        ),
+        "facts": facts,
+    }
+
+
 def _missing_research_facts(row: ListRow) -> list[str]:
     """Name decision facts that the selected listing still does not establish."""
 
@@ -1176,7 +1338,7 @@ def _missing_research_facts(row: ListRow) -> list[str]:
         ("Floor level", row.floor_text is not None),
         ("Parking availability", row.parking is not None),
         ("In-suite laundry", has_attribute("in_suite_laundry")),
-        ("Available date", row.available is not None),
+        ("Exact availability date", has_attribute("available_date")),
         ("Lease length", has_attribute("lease_months")),
         ("Total monthly cost and utilities", has_attribute("total_monthly")),
         ("Floor plan or room dimensions", has_attribute("floor_plan")),
