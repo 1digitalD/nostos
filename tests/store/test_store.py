@@ -10,14 +10,14 @@ import pytest
 from nostos.model.listing import Origin
 from nostos.model.source_record import JSONValue
 from nostos.store.db import apply_migrations, connect
-from nostos.store.repo import ListingRepo, ObservationRepo, ScoreRepo
+from nostos.store.repo import ListingRepo, ObservationRepo, ResearchRepo, ScoreRepo
 
 
 def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "nostos.db"
     with connect(db_path) as conn:
         applied = apply_migrations(conn)
-        assert applied == [1, 2, 3, 4]
+        assert applied == [1, 2, 3, 4, 5]
         assert apply_migrations(conn) == []
 
         table_names = {
@@ -37,7 +37,39 @@ def test_migration_applies_to_empty_db_and_is_idempotent(tmp_path: Path) -> None
         "user_state",
         "run",
         "listing_action",
+        "research_run",
+        "research_result",
     }.issubset(table_names)
+
+
+def test_research_repo_replaces_results_for_listing(tmp_path: Path) -> None:
+    db_path = tmp_path / "nostos.db"
+    with connect(db_path) as conn:
+        apply_migrations(conn)
+        ListingRepo(conn).ensure_listing("listing-1")
+        repo = ResearchRepo(conn)
+        repo.replace_results(
+            listing_id="listing-1",
+            subject="123 Main St",
+            provider="perplexity",
+            status="complete",
+            error=None,
+            fetched_at="2026-09-06T00:00:00+00:00",
+            filtered_stale_count=2,
+            results=[{
+                "topic": "Building management",
+                "title": "Current building review",
+                "url": "https://example.test/review",
+                "source": "Example",
+                "published_at": "2026-08-01",
+                "excerpt": "Management changed this year.",
+            }],
+        )
+        run, results = repo.get("listing-1")
+
+    assert run is not None and run["result_count"] == 1
+    assert run["filtered_stale_count"] == 2
+    assert results[0]["title"] == "Current building review"
 
 
 def test_listing_action_table_accepts_record_and_check_constraint(tmp_path: Path) -> None:

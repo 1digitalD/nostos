@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import quote_plus, urlencode
@@ -34,7 +34,7 @@ from nostos.sources import (
 from nostos.sources.manual import ManualSource
 from nostos.store.actions import ActionKind, ActionRepo
 from nostos.store.db import apply_migrations, connect
-from nostos.store.repo import ObservationRepo, ScoreRepo
+from nostos.store.repo import ObservationRepo, ResearchRepo, ScoreRepo
 from nostos.web.query import (
     SORT_OPTIONS,
     STATUS_FILTER_VALUES,
@@ -48,7 +48,7 @@ from nostos.web.query import (
     rule_rows_from_breakdown,
     sort_label,
 )
-from nostos.web.research import nearby_places
+from nostos.web.research import ResearchProvider, compile_web_research, nearby_places
 from nostos.workflows import (
     CorrectionField,
     ManualListing,
@@ -245,6 +245,24 @@ def _looks_like_street_address(value: str) -> bool:
     return re.search(r"\b\d{1,6}\s+[A-Za-z]", value) is not None
 
 
+_STREET_ADDRESS_RE = re.compile(
+    r"\b\d{1,6}\s+[A-Za-z][A-Za-z0-9 .'-]{0,70}?\s+"
+    r"(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|lane|ln|"
+    r"court|ct|crescent|cres|place|pl|terrace|trail|highway|hwy)\b",
+    re.IGNORECASE,
+)
+
+
+def _research_subject(address: str | None, title: str | None, listing_id: str) -> str:
+    if address and address.strip():
+        return address.strip()
+    title_value = (title or "").strip()
+    title_address = _STREET_ADDRESS_RE.search(title_value)
+    if title_address is not None:
+        return title_address.group(0).strip()
+    return title_value or listing_id
+
+
 class AppState:
     """Holds resolved context, sources, and templates for the app lifetime."""
 
@@ -377,7 +395,13 @@ OptionalScoreFilter = Annotated[
 ]
 
 
-def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> FastAPI:
+def create_app(
+    *,
+    db_path: Path,
+    profile_path: Path,
+    citypack_path: Path,
+    research_provider: ResearchProvider | None = None,
+) -> FastAPI:
     """Build the FastAPI app bound to a specific db/profile/citypack triple."""
 
     templates = _build_templates()
@@ -660,7 +684,8 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "SELECT source, COUNT(DISTINCT listing_id) AS count "
                 "FROM source_record GROUP BY source ORDER BY source"
             ).fetchall()
-        subject = (row.address or row.title or listing_id).strip()
+            web_research_run, web_research_results = ResearchRepo(conn).get(listing_id)
+        subject = _research_subject(row.address, row.title, listing_id)
         return state.templates.TemplateResponse(
             request=request,
             name="research.html",
@@ -677,8 +702,69 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                     for item in source_rows
                 ],
                 "missing_facts": _missing_research_facts(row),
+                "web_research_run": web_research_run,
+                "web_research_results": web_research_results,
+                "web_research_auto_start": web_research_run is None,
                 "profile_id": state.profile_id,
             },
+        )
+
+    @app.post("/listings/{listing_id}/web-research.json", response_class=JSONResponse)
+    def web_research_listing(
+        listing_id: str,
+        state: StateDep,
+        force: bool = Query(default=False),
+    ) -> JSONResponse:
+        with state.connect() as conn:
+            row = load_detail(
+                conn,
+                listing_id=listing_id,
+                context=state.context,
+                profile_id=state.profile_id,
+                sources=state.sources,
+            )
+            cached_run, cached_results = ResearchRepo(conn).get(listing_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        if cached_run is not None and not force:
+            fetched_at = datetime.fromisoformat(str(cached_run["fetched_at"]))
+            if datetime.now(UTC) - fetched_at.astimezone(UTC) < timedelta(hours=24):
+                return JSONResponse(
+                    {"status": "cached", "count": len(cached_results), "reload": False}
+                )
+        subject = _research_subject(row.address, row.title, listing_id)
+        try:
+            compiled = compile_web_research(
+                subject,
+                state.context.profile.city,
+                provider=research_provider,
+            )
+        except RuntimeError as exc:
+            return JSONResponse(
+                {"status": "error", "message": str(exc), "reload": False},
+                status_code=502,
+            )
+        results = compiled["results"]
+        if not isinstance(results, list):
+            results = []
+        with state.connect() as conn:
+            ResearchRepo(conn).replace_results(
+                listing_id=listing_id,
+                subject=subject,
+                provider=str(compiled["provider"]),
+                status="complete" if results else "empty",
+                error=None,
+                fetched_at=str(compiled["fetched_at"]),
+                filtered_stale_count=int(compiled["filtered_stale_count"]),
+                results=cast(list[dict[str, str]], results),
+            )
+        return JSONResponse(
+            {
+                "status": "complete" if results else "empty",
+                "count": len(results),
+                "filtered_stale_count": int(compiled["filtered_stale_count"]),
+                "reload": True,
+            }
         )
 
     @app.post("/listings/{listing_id}/nearby.json", response_class=JSONResponse)

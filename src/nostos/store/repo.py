@@ -148,6 +148,84 @@ class ListingRepo:
         return int(inserted_id)
 
 
+class ResearchRepo:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def replace_results(
+        self,
+        *,
+        listing_id: str,
+        subject: str,
+        provider: str,
+        status: str,
+        error: str | None,
+        fetched_at: str,
+        filtered_stale_count: int,
+        results: list[dict[str, str]],
+    ) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM research_result WHERE listing_id=?", (listing_id,))
+            self._conn.executemany(
+                """
+                INSERT INTO research_result(
+                    listing_id,topic,title,url,source,published_at,excerpt,fetched_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        listing_id,
+                        item["topic"],
+                        item["title"],
+                        item["url"],
+                        item["source"],
+                        item["published_at"],
+                        item["excerpt"],
+                        fetched_at,
+                    )
+                    for item in results
+                ],
+            )
+            self._conn.execute(
+                """
+                INSERT INTO research_run(
+                    listing_id,subject,provider,status,error,fetched_at,
+                    result_count,filtered_stale_count
+                ) VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(listing_id) DO UPDATE SET
+                    subject=excluded.subject,provider=excluded.provider,status=excluded.status,
+                    error=excluded.error,fetched_at=excluded.fetched_at,
+                    result_count=excluded.result_count,
+                    filtered_stale_count=excluded.filtered_stale_count
+                """,
+                (
+                    listing_id,
+                    subject,
+                    provider,
+                    status,
+                    error,
+                    fetched_at,
+                    len(results),
+                    filtered_stale_count,
+                ),
+            )
+
+    def get(self, listing_id: str) -> tuple[dict[str, object] | None, list[dict[str, str]]]:
+        run_row = self._conn.execute(
+            "SELECT * FROM research_run WHERE listing_id=?", (listing_id,)
+        ).fetchone()
+        result_rows = self._conn.execute(
+            """
+            SELECT topic,title,url,source,published_at,excerpt,fetched_at
+            FROM research_result WHERE listing_id=?
+            ORDER BY published_at DESC,source,title
+            """,
+            (listing_id,),
+        ).fetchall()
+        run = dict(run_row) if run_row is not None else None
+        return run, [dict(row) for row in result_rows]
+
+
 class ObservationRepo:
     def __init__(
         self,

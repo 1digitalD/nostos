@@ -153,7 +153,19 @@ def detect(l: Listing, ctx) -> Signal | None:
 
 class NotifySink(Protocol):
     def send(run: RunSummary, listings: list[ScoredListing]) -> None
+
+
+class ResearchProvider(Protocol):
+    name: str
+
+    def search(
+        query: str, *, limit: int, date_after: str, date_before: str
+    ) -> list[dict[str, Any]]
 ```
+
+Address research depends on this structured provider contract, not on an agent runtime.
+The packaged Perplexity adapter supports standalone operation. An embedded Codex,
+Claude, or other agent host can inject another provider when it creates the web app.
 
 **Discovery and detail live on the same class.** The old codebase implemented them as
 two separate stacks — `adapters/*.py` for discovery and `track/*_extractor.py` for

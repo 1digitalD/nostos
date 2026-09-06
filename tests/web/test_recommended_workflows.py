@@ -108,7 +108,9 @@ def test_preview_apply_stale_guard_manual_add_and_viewing(tmp_path: Path) -> Non
     assert apply.status_code == 400 or apply.status_code == 409
 
 
-def test_listing_correction_and_research_workflow(tmp_path: Path) -> None:
+def test_listing_correction_and_research_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, db_path, profile_path = _client(tmp_path)
     first = "craigslist:unit-a"
     second = "craigslist:unit-b"
@@ -130,7 +132,7 @@ def test_listing_correction_and_research_workflow(tmp_path: Path) -> None:
     assert research.status_code == 200
     assert "Possible matching advertisements" in research.text
     assert "Research ready" in research.text
-    assert "2</strong><span>saved listings checked" in research.text
+    assert "0</strong><span>recent web findings" in research.text
     assert second in research.text
     assert "unit-b" in research.text
     assert "Address research" in research.text
@@ -138,6 +140,48 @@ def test_listing_correction_and_research_workflow(tmp_path: Path) -> None:
     assert "Nearby places" in research.text
     address_research = research.text.split("Address research", 1)[1].split("Nearby places", 1)[0]
     assert "2450" not in address_research
+
+    calls = 0
+
+    def compiled_results(
+        _subject: str, _city: str, **_kwargs: object
+    ) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "provider": "perplexity",
+            "fetched_at": "2026-09-06T00:00:00+00:00",
+            "filtered_stale_count": 3,
+            "results": [{
+                "topic": "Building management",
+                "title": "Current building management review",
+                "url": "https://example.test/current-review",
+                "source": "Example Local News",
+                "published_at": "2026-08-15",
+                "excerpt": "The property manager changed in 2026.",
+            }],
+        }
+
+    monkeypatch.setattr("nostos.web.app.compile_web_research", compiled_results)
+    compiled = client.post(f"/listings/{first}/web-research.json")
+    assert compiled.status_code == 200
+    assert compiled.json()["count"] == 1
+    assert calls == 1
+
+    compiled_page = client.get(f"/listings/{first}/research")
+    assert "1</strong><span>recent web findings" in compiled_page.text
+    assert "Current building management review" in compiled_page.text
+    assert "Example Local News" in compiled_page.text
+    assert "2026-08-15" in compiled_page.text
+    assert "The property manager changed in 2026" in compiled_page.text
+    assert (
+        "3 undated, future-dated, or older-than-two-year results were excluded"
+        in compiled_page.text
+    )
+
+    cached = client.post(f"/listings/{first}/web-research.json")
+    assert cached.json()["status"] == "cached"
+    assert calls == 1
 
     reset = client.post(
         f"/listings/{first}/corrections/reset",

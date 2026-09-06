@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+import os
+import re
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Protocol, cast
+from urllib.parse import urlparse
 
 import httpx
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _RADIUS_METRES = 1500
+_EXTERNAL_WRAPPER_RE = re.compile(
+    r"<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>|Source: Web Search\s*---",
+    re.IGNORECASE,
+)
 
 
 def _distance_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -116,4 +124,195 @@ def nearby_places(lat: float, lng: float) -> dict[str, Any]:
         "source": "OpenStreetMap contributors",
         "checked_at": datetime.now(UTC).isoformat(),
         "groups": groups,
+    }
+
+
+def _clean_external_text(value: object, *, limit: int) -> str:
+    text = _EXTERNAL_WRAPPER_RE.sub(" ", str(value or ""))
+    return " ".join(text.split())[:limit]
+
+
+class ResearchProvider(Protocol):
+    """Host-independent boundary for structured web search."""
+
+    name: str
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        date_after: str,
+        date_before: str,
+    ) -> list[dict[str, Any]]: ...
+
+
+class PerplexityResearchProvider:
+    """Standalone adapter for Perplexity's structured Search API."""
+
+    name = "perplexity"
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        date_after: str,
+        date_before: str,
+    ) -> list[dict[str, Any]]:
+        after = datetime.fromisoformat(date_after).strftime("%-m/%-d/%Y")
+        before = datetime.fromisoformat(date_before).strftime("%-m/%-d/%Y")
+        response = httpx.post(
+            "https://api.perplexity.ai/search",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/1digitalD/nostos",
+                "X-Title": "Nostos address research",
+            },
+            json={
+                "query": query,
+                "max_results": limit,
+                "search_after_date_filter": after,
+                "search_before_date_filter": before,
+                "max_tokens_per_page": 1024,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("The research provider returned an invalid response.") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise RuntimeError("The research provider returned an invalid response.")
+        return cast(list[dict[str, Any]], payload["results"])
+
+
+def _research_env_value(name: str) -> str | None:
+    configured = os.environ.get(name, "").strip()
+    if configured:
+        return configured
+    env_path = Path(
+        os.environ.get(
+            "NOSTOS_RESEARCH_ENV_FILE",
+            str(Path.home() / ".config" / "nostos" / "research.env"),
+        )
+    ).expanduser()
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == name:
+            return value.strip().strip('"\'') or None
+    return None
+
+
+def configured_research_provider() -> ResearchProvider:
+    provider_name = _research_env_value("NOSTOS_RESEARCH_PROVIDER") or "perplexity"
+    if provider_name.casefold() != "perplexity":
+        raise RuntimeError(f"Unsupported research provider: {provider_name}")
+    api_key = _research_env_value("NOSTOS_PERPLEXITY_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Research is not configured. Set NOSTOS_PERPLEXITY_API_KEY or add it to "
+            "~/.config/nostos/research.env."
+        )
+    return PerplexityResearchProvider(api_key)
+
+
+def _topic_for(title: str, excerpt: str) -> str:
+    text = f"{title} {excerpt}".casefold()
+    if any(word in text for word in ("police", "fire", "incident", "security", "crime")):
+        return "Safety"
+    if any(word in text for word in ("management", "concierge", "elevator", "maintenance")):
+        return "Building management"
+    if any(word in text for word in ("gym", "grocery", "transit", "park", "shopping")):
+        return "Services and access"
+    if any(word in text for word in ("neighbourhood", "neighborhood", "district", "area")):
+        return "Area and locality"
+    return "Address and building"
+
+
+def _published_date(value: object) -> date:
+    raw = str(value or "").strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        return datetime.strptime(raw, "%m/%d/%Y").date()
+
+
+def compile_web_research(
+    subject: str,
+    city: str,
+    *,
+    provider: ResearchProvider | None = None,
+) -> dict[str, Any]:
+    """Compile one bounded address search through a pluggable provider."""
+
+    now = datetime.now(UTC)
+    cutoff = now.date() - timedelta(days=730)
+    query = (
+        f'"{subject[:160]}" {city} property management building reviews safety incidents '
+        "neighbourhood amenities gym grocery transit parks"
+    )
+    try:
+        active_provider = provider or configured_research_provider()
+        raw_results = active_provider.search(
+            query,
+            limit=10,
+            date_after=cutoff.isoformat(),
+            date_before=now.date().isoformat(),
+        )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("The research provider timed out.") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError("The research provider request failed.") from exc
+    results: list[dict[str, str]] = []
+    filtered_stale = 0
+    seen_urls: set[str] = set()
+    for raw in raw_results:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or "").strip()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+            continue
+        published_raw = str(raw.get("date") or raw.get("published") or "").strip()
+        try:
+            published = _published_date(published_raw)
+        except ValueError:
+            filtered_stale += 1
+            continue
+        if published < cutoff or published > now.date():
+            filtered_stale += 1
+            continue
+        title = _clean_external_text(raw.get("title"), limit=240)
+        excerpt = _clean_external_text(raw.get("snippet") or raw.get("description"), limit=700)
+        if not url or not title or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append(
+            {
+                "topic": _topic_for(title, excerpt),
+                "title": title,
+                "url": url,
+                "source": _clean_external_text(raw.get("siteName"), limit=120)
+                or parsed_url.hostname
+                or "Web",
+                "published_at": published.isoformat(),
+                "excerpt": excerpt or "No excerpt was provided by the search source.",
+            }
+        )
+    return {
+        "provider": active_provider.name,
+        "fetched_at": now.isoformat(),
+        "filtered_stale_count": filtered_stale,
+        "results": results,
     }

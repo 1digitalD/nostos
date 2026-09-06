@@ -101,7 +101,22 @@ The web UI binds to `127.0.0.1` by default. There is no app-level auth, so remot
 access should use a trusted host control such as Tailscale Serve. To share a read-only
 snapshot, use `--export`. Listing actions and hunt stages persist across watch runs.
 Listing detail pages also support user corrections with reset, and a research workspace
-for matching stored ads and targeted searches on other rental sites.
+for matching stored ads, nearby services, and compiled recent address research.
+
+Compiled research is independent of any agent host. The built-in standalone provider
+uses Perplexity's structured Search API when `NOSTOS_PERPLEXITY_API_KEY` is set. You can
+put local service credentials in `~/.config/nostos/research.env` instead of a LaunchAgent
+or shell environment:
+
+```bash
+NOSTOS_RESEARCH_PROVIDER=perplexity
+NOSTOS_PERPLEXITY_API_KEY=your-key
+```
+
+The application boundary is the `ResearchProvider` protocol in
+`nostos.web.research`; embedded hosts can pass their own implementation to `create_app`.
+This keeps Nostos usable as a standalone app and lets Codex, Claude, or another agent
+adapter supply structured findings without becoming a package dependency.
 
 Hard filters and ranking weights are editable in the browser at `/profile`. Preview
 shows entrants, exits, and match counts before a guarded save. Saving writes the

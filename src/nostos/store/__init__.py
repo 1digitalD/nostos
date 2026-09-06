@@ -3,6 +3,7 @@ from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import (
     ListingRepo,
     ObservationRepo,
+    ResearchRepo,
     RunRepo,
     ScoreRepo,
     UserStateRepo,
@@ -14,6 +15,7 @@ __all__ = [
     "ListingAction",
     "ListingRepo",
     "ObservationRepo",
+    "ResearchRepo",
     "RunRepo",
     "ScoreRepo",
     "UserStateRepo",

@@ -10,13 +10,36 @@
   </header>
 
   <section class="research-summary" aria-label="Research scan summary">
-    <div><strong>{{ checked_records }}</strong><span>saved listings checked</span></div>
+    <div><strong>{{ web_research_results|length }}</strong><span>recent web findings</span></div>
     <div><strong>{{ related|length }}</strong><span>possible matches found</span></div>
     <div><strong>{{ missing_facts|length }}</strong><span>facts still to verify</span></div>
   </section>
 
   <div class="research-layout">
     <main class="research-main">
+      <section class="detail-section compiled-research" id="compiled-research" data-endpoint="/listings/{{ row.listing_id }}/web-research.json" data-auto="{{ 1 if web_research_auto_start else 0 }}">
+        <div class="section-heading">
+          <div><h2>Compiled web research</h2><p>Recent address-specific results from the configured research provider, cached for 24 hours.</p></div>
+          <button type="button" class="btn btn-secondary" data-refresh-research>Refresh research</button>
+        </div>
+        <p class="compiled-status" role="status" aria-live="polite">
+          {% if web_research_auto_start %}Compiling recent sources…{% elif web_research_results %}Research compiled on {{ web_research_run.fetched_at[:10] }}.{% else %}No recent dated results were found.{% endif %}
+        </p>
+        {% if web_research_results %}
+          <div class="compiled-findings">
+            {% for item in web_research_results %}
+              <article class="compiled-finding">
+                <div><span class="finding-topic">{{ item.topic }}</span><span>{{ item.source }}</span><time datetime="{{ item.published_at }}">{{ item.published_at }}</time></div>
+                <h3><a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a></h3>
+                <p>{{ item.excerpt }}</p>
+                <a class="text-link" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">View cited source ↗</a>
+              </article>
+            {% endfor %}
+          </div>
+          {% if web_research_run.filtered_stale_count %}<p class="research-filter-note">{{ web_research_run.filtered_stale_count }} undated, future-dated, or older-than-two-year result{% if web_research_run.filtered_stale_count != 1 %}s were{% else %} was{% endif %} excluded.</p>{% endif %}
+        {% endif %}
+      </section>
+
       <section class="detail-section">
         <div class="section-heading"><div><h2>Address research</h2><p>Searches begin with the address only. Time-sensitive web searches are limited to the past year.</p></div></div>
         {% if not research_subject_precise %}
@@ -70,6 +93,23 @@
 
 <script>
 (function () {
+  var compiled = document.getElementById('compiled-research');
+  if (compiled) {
+    var compiledStatus = compiled.querySelector('.compiled-status');
+    var refresh = compiled.querySelector('[data-refresh-research]');
+    function runCompiledResearch(force) {
+      refresh.disabled = true;
+      compiledStatus.classList.remove('is-error');
+      compiledStatus.textContent = 'Compiling recent address sources…';
+      fetch(compiled.dataset.endpoint + (force ? '?force=1' : ''), { method: 'POST', headers: { 'Accept': 'application/json' } })
+        .then(function (response) { return response.json().then(function (data) { if (!response.ok) throw new Error(data.message || 'Research failed.'); return data; }); })
+        .then(function (data) { if (data.reload) window.location.reload(); else { refresh.disabled = false; compiledStatus.textContent = data.count + ' cached finding' + (data.count === 1 ? '' : 's') + ' available.'; } })
+        .catch(function (error) { refresh.disabled = false; compiledStatus.classList.add('is-error'); compiledStatus.textContent = error.message || 'Could not compile research. Try again.'; });
+    }
+    refresh.addEventListener('click', function () { runCompiledResearch(true); });
+    if (compiled.dataset.auto === '1') runCompiledResearch(false);
+  }
+
   var section = document.getElementById('nearby-places');
   if (!section) return;
   var status = section.querySelector('.nearby-status');
