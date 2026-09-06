@@ -1,7 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Listings · Nostos{% endblock %}
 {% block content %}
-<section class="filter-card">
+<section class="list-intro">
+  <div>
+    <h1>Find the apartments worth your time.</h1>
+    <p>Toronto listings ranked against your hard requirements and personal trade-offs.</p>
+  </div>
+  <a class="btn btn-secondary" href="/profile">Review criteria</a>
+</section>
+
+<section class="filter-card search-panel">
   <details class="more-filters">
     <summary>Add a listing manually</summary>
     <form method="post" action="/manual" class="more-filters-grid">
@@ -23,7 +31,7 @@
       {% for chip in profile_summary %}
         <span class="profile-summary-chip profile-summary-chip-{{ chip.kind }}">{{ chip.label }}</span>
       {% endfor %}
-      <a class="profile-summary-edit" href="/profile" title="Edit weights, thresholds, sources">⚙ Edit</a>
+      <a class="profile-summary-edit" href="/profile" title="Edit weights, thresholds, sources">Edit criteria</a>
     </div>
   {% endif %}
 
@@ -193,14 +201,14 @@
             </div>
             <span class="status-badge status-{{ row.match_status }}"
                   title="{{ row.match_reasons_text or status_titles[row.match_status] }}">
-              {% if row.match_status == 'match' %}✓ Match{% elif row.match_status == 'unverified' %}? Unverified{% elif row.match_status == 'miss' %}✕ Miss{% elif row.match_status == 'excluded' %}⊘ Excluded{% endif %}
+              {% if row.match_status == 'match' %}Match{% elif row.match_status == 'unverified' %}Unverified{% elif row.match_status == 'miss' %}Miss{% elif row.match_status == 'excluded' %}Excluded{% endif %}
             </span>
           </div>
 
           <div class="card-meta">
-            {% if row.beds is not none %}<span>🛏 {{ row.beds | round(0, 'floor') | int }} bd</span>{% endif %}
-            {% if row.baths is not none %}<span>🛁 {{ row.baths }} ba</span>{% endif %}
-            {% if row.area_value is not none %}<span>📐 {{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or 'sqft' }}</span>{% endif %}
+            {% if row.beds is not none %}<span>{{ row.beds | round(0, 'floor') | int }} bed</span>{% endif %}
+            {% if row.baths is not none %}<span>{{ row.baths }} bath</span>{% endif %}
+            {% if row.area_value is not none %}<span>{{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or 'sqft' }}</span>{% endif %}
             {% if row.area_label %}<span>{{ row.area_label }}</span>{% endif %}
           </div>
 
@@ -236,24 +244,6 @@
             </span>
           </div>
 
-          {% if row.category_scores %}
-            <div class="cat-scores">
-              <div class="cat-scores-title">Match breakdown</div>
-              {% for cat in row.category_scores %}
-                <div class="cat-row {% if cat.score >= 0 %}match{% else %}miss{% endif %}">
-                  <div class="cat-name" title="{{ cat.label }}">{{ cat.label }}</div>
-                  <div class="cat-bar">
-                    <div class="cat-bar-fill"
-                         style="width: {{ cat.pct | round(1) }}%"></div>
-                  </div>
-                  <div class="cat-val">
-                    {% if cat.score > 0 %}+{% endif %}{{ cat.score | round(1) }}/{{ cat.max | round(1) }}
-                  </div>
-                </div>
-              {% endfor %}
-            </div>
-          {% endif %}
-
           <div class="card-actions-row">
             <button type="button"
                     class="card-action-btn {% if state.star %}is-on{% endif %}"
@@ -261,27 +251,27 @@
                     data-listing="{{ row.listing_id }}"
                     title="{% if state.star %}Shortlisted — click to remove{% else %}Shortlist this listing{% endif %}"
                     aria-label="Shortlist"
-                    aria-pressed="{{ 'true' if state.star else 'false' }}">★ Shortlist</button>
+                    aria-pressed="{{ 'true' if state.star else 'false' }}">{% if state.star %}Saved{% else %}Save{% endif %}</button>
             <button type="button"
                     class="card-action-btn {% if state.dismiss %}is-on{% endif %}"
                     data-action="dismiss"
                     data-listing="{{ row.listing_id }}"
                     title="{% if state.dismiss %}Dismissed — click to undo (still shown){% else %}Dismiss (still shown){% endif %}"
                     aria-label="Dismiss"
-                    aria-pressed="{{ 'true' if state.dismiss else 'false' }}">✕ Dismiss</button>
+                    aria-pressed="{{ 'true' if state.dismiss else 'false' }}">{% if state.dismiss %}Dismissed{% else %}Dismiss{% endif %}</button>
             <button type="button"
                     class="card-action-btn card-action-exclude {% if row.match_status == 'excluded' %}is-on{% endif %}"
                     data-action="excluded"
                     data-listing="{{ row.listing_id }}"
                     title="{% if row.match_status == 'excluded' %}Excluded — click to undo{% else %}Exclude (hides from list unless “Show excluded” is on){% endif %}"
                     aria-label="Exclude"
-                    aria-pressed="{{ 'true' if row.match_status == 'excluded' else 'false' }}">⊘ Exclude</button>
+                    aria-pressed="{{ 'true' if row.match_status == 'excluded' else 'false' }}">Exclude</button>
             <a class="card-action-btn card-action-view"
                href="{{ row.url }}"
                target="_blank"
                rel="noopener noreferrer"
                title="Open original listing in a new tab"
-               aria-label="Open original listing">↗ Open</a>
+               aria-label="Open original listing">Source</a>
           </div>
         </div>
 

@@ -20,6 +20,7 @@ from nostos.config.profile import Profile, ScaledWeight
 from nostos.config.wizard import dump_profile_yaml
 from nostos.context import SearchContext, load_search_context
 from nostos.enrich.location import directions_url, distance_km, walking_route
+from nostos.model import Observed
 from nostos.rank import rules as rules_module
 from nostos.rank.rescore import RescoreReport, rescore_profile
 from nostos.rank.rules import DEFAULT_REGISTRY
@@ -504,19 +505,38 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
             if row is None:
                 raise HTTPException(status_code=404, detail="Listing not found")
             related = research_candidates(conn, listing_id)
-        terms = " ".join(value for value in (row.address, row.title) if value).strip()
-        query = quote_plus(terms or listing_id)
+            checked_records = int(
+                conn.execute("SELECT COUNT(DISTINCT listing_id) FROM source_record").fetchone()[0]
+            )
+            source_rows = conn.execute(
+                "SELECT source, COUNT(DISTINCT listing_id) AS count "
+                "FROM source_record GROUP BY source ORDER BY source"
+            ).fetchall()
+        subject = (row.address or row.title or listing_id).strip()
+        terms = f'"{subject[:140]}" {row.rent_text} rental'
+        query = quote_plus(terms)
         sites = (
-            ("Search the open web", f"https://www.google.com/search?q={query}"),
-            ("Search Kijiji", f"https://www.google.com/search?q=site%3Akijiji.ca+{query}"),
-            ("Search Rentals.ca", f"https://www.google.com/search?q=site%3Arentals.ca+{query}"),
-            ("Search Realtor.ca", f"https://www.google.com/search?q=site%3Arealtor.ca+{query}"),
+            {"label": "Search the open web", "site": "Google", "url": f"https://www.google.com/search?q={query}"},
+            {"label": "Check Kijiji", "site": "Kijiji", "url": f"https://www.google.com/search?q=site%3Akijiji.ca+{query}"},
+            {"label": "Check Rentals.ca", "site": "Rentals.ca", "url": f"https://www.google.com/search?q=site%3Arentals.ca+{query}"},
+            {"label": "Check Realtor.ca", "site": "Realtor.ca", "url": f"https://www.google.com/search?q=site%3Arealtor.ca+{query}"},
         )
         return state.templates.TemplateResponse(
             request=request,
             name="research.html",
-            context={"row": row, "listing_id": listing_id, "related": related,
-                     "research_links": sites, "profile_id": state.profile_id},
+            context={
+                "row": row,
+                "listing_id": listing_id,
+                "related": related,
+                "research_links": sites,
+                "checked_records": checked_records,
+                "source_counts": [
+                    {"source": str(item["source"]), "count": int(item["count"])}
+                    for item in source_rows
+                ],
+                "missing_facts": _missing_research_facts(row),
+                "profile_id": state.profile_id,
+            },
         )
 
     @app.get("/profile", response_class=HTMLResponse)
@@ -808,6 +828,29 @@ def _active_filters(filters: ListFilter) -> dict[str, object]:
     return pairs
 
 
+def _missing_research_facts(row: ListRow) -> list[str]:
+    """Name decision facts that the selected listing still does not establish."""
+
+    attributes = row.listing.attributes
+
+    def has_attribute(name: str) -> bool:
+        value = attributes.get(name)
+        return isinstance(value, Observed) and value.value not in (None, "")
+
+    facts = (
+        ("Exact street address and unit number", bool(row.address)),
+        ("Usable area", row.area_value is not None),
+        ("Floor level", row.floor_text is not None),
+        ("Parking availability", row.parking is not None),
+        ("In-suite laundry", has_attribute("in_suite_laundry")),
+        ("Available date", row.available is not None),
+        ("Lease length", has_attribute("lease_months")),
+        ("Total monthly cost and utilities", has_attribute("total_monthly")),
+        ("Floor plan or room dimensions", has_attribute("floor_plan")),
+    )
+    return [label for label, present in facts if not present]
+
+
 def _filter_query_pairs(filters: ListFilter) -> dict[str, object]:
     """Serialize a ListFilter to URL query pairs, omitting defaults."""
 
@@ -875,7 +918,7 @@ def _quick_toggles(filters: ListFilter) -> list[dict[str, object]]:
     """Boolean URL toggles rendered as chips (click flips the param)."""
 
     specs: tuple[tuple[str, str, str, bool], ...] = (
-        ("starred", "★ Shortlisted only", "Show only listings you shortlisted", filters.starred),
+        ("starred", "Shortlisted only", "Show only listings you shortlisted", filters.starred),
         ("hide_dismissed", "Hide dismissed", "Drop listings you dismissed", filters.hide_dismissed),
         ("show_excluded", "Show excluded", "Include listings you excluded", filters.show_excluded),
     )
@@ -895,9 +938,9 @@ def _status_chips(filters: ListFilter) -> list[dict[str, object]]:
     """Match-status filter chips (single-select, click again to clear)."""
 
     specs: tuple[tuple[str, str, str], ...] = (
-        ("match", "✓ Match", "Only listings that meet every hard criterion"),
-        ("unverified", "? Unverified", "Only listings missing data for a criterion"),
-        ("miss", "✕ Miss", "Only listings that fail a hard criterion"),
+        ("match", "Matches", "Only listings that meet every hard criterion"),
+        ("unverified", "Needs verification", "Only listings missing data for a criterion"),
+        ("miss", "Misses", "Only listings that fail a hard criterion"),
     )
     chips: list[dict[str, object]] = []
     for value, label, title in specs:

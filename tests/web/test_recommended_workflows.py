@@ -124,14 +124,16 @@ def test_listing_correction_and_research_workflow(tmp_path: Path) -> None:
     page = client.get(corrected.headers["location"])
     assert "Correction applied and ranking updated" in page.text
     assert "2450.00 CAD" in page.text
-    assert "Research this unit" in page.text
+    assert "Open research workspace" in page.text
 
     research = client.get(f"/listings/{first}/research")
     assert research.status_code == 200
     assert "Possible matching advertisements" in research.text
+    assert "Scan complete" in research.text
+    assert "2</strong><span>saved listings checked" in research.text
     assert second in research.text
     assert "unit-b" in research.text
-    assert "Search other sources" in research.text
+    assert "Search live sources" in research.text
 
     reset = client.post(
         f"/listings/{first}/corrections/reset",

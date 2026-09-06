@@ -212,14 +212,15 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     body = resp.text
     assert "Sunny 2BR in Kitsilano" in body
     assert "1234 West 4th Ave, Kitsilano" in body
-    assert "score-good" in body  # 82.5 >= 75
+    assert "detail-score-block" in body
+    assert "82" in body
     # One-click actions are wired via data-action, not form actions.
     assert 'data-action="star"' in body
     assert 'data-listing="' in body
     assert f"data-listing=\"{listing_id}\"" in body
     assert "Action history" in body
     # Buttons in default text (not 'is-on' class).
-    assert "★ Shortlist" in body
+    assert "Save to shortlist" in body
     # No button has the 'is-on' modifier class on initial render.
     # The literal string 'is-on' may appear in inline JS, so check for the
     # class-attribute pattern only.
@@ -237,7 +238,7 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     # Detail page reflects the starred state and keeps the button reversible.
     resp = client.get(f"/listings/{listing_id}")
     body = resp.text
-    assert "★ Shortlisted" in body
+    assert "Saved" in body
     assert "btn-star is-on" in body
     assert 'aria-pressed="true"' in body
     assert "disabled" not in body.split('data-action="star"', 1)[1].split(">", 1)[0]
@@ -252,7 +253,7 @@ def test_end_to_end_listing_and_actions(tmp_path: Path) -> None:
     # Both surfaces now reflect the correction.
     resp = client.get(f"/listings/{listing_id}")
     body = resp.text
-    assert "★ Shortlist" in body
+    assert "Save to shortlist" in body
     assert "btn-star is-on" not in body
 
     resp = client.get("/")
@@ -527,7 +528,7 @@ def test_index_starred_status_excluded_and_sort_filters(tmp_path: Path) -> None:
     body = client.get("/", params={"show_excluded": 1}).text
     assert _card_ids(body) == ["craigslist:a", "craigslist:b", "craigslist:c"]
     assert "is-excluded" in body
-    assert "⊘ Excluded" in body
+    assert "Excluded" in body
     # Area chip filters (single-select) and renders active.
     body = client.get("/", params={"area_name": "brentwood", "show_excluded": 1}).text
     assert _card_ids(body) == ["craigslist:c"]
@@ -583,7 +584,8 @@ def test_card_shows_score_badge_and_top_contributors(tmp_path: Path) -> None:
     assert '<span class="score score-good">82.5</span>' in body
     assert "−10 pet friendly" in body
     assert "+6 in-suite laundry" in body
-    assert "Amenities" in body  # category label, not raw key
+    # Cards keep only the highest-signal individual factors; category detail
+    # remains available on the listing page.
 
 
 def test_detail_renders_rule_table_and_reasons(tmp_path: Path) -> None:
@@ -615,7 +617,7 @@ def test_detail_renders_rule_table_and_reasons(tmp_path: Path) -> None:
     _seed_listing(db_path, profile_id, "craigslist:seed-1", payload={"price": 3500},
                   score=40.0, breakdown=breakdown)
     body = client.get("/listings/craigslist:seed-1").text
-    assert "✕ Miss" in body
+    assert "Miss" in body
     assert "<li>rent $3,500 &gt; max $3,200</li>" in body
     assert "<li>floor unstated</li>" in body
     # Rule table: fired rows sorted by |contribution|, evidence + weight shown.

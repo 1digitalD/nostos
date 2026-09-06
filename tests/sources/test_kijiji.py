@@ -121,6 +121,28 @@ def test_to_listing_does_not_infer_area_key_from_description_only() -> None:
     assert listing.place.area_key is None
 
 
+def test_to_listing_removes_browser_title_suffix() -> None:
+    source = KijijiSource(now_provider=_fixed_now)
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1741049008",
+        url="https://www.kijiji.ca/v-apartments-condos/1741049008",
+        content_hash="hash-title-suffix",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": (
+                "Spacious 2-bedroom apartment | Long Term Rentals | "
+                "City of Toronto | Free local classifieds - Kijiji"
+            ),
+            "price": 2800,
+        },
+    )
+
+    listing = source.to_listing(record, _build_context())
+
+    assert listing.attributes["title"].value == "Spacious 2-bedroom apartment"
+
+
 def test_to_listing_infers_area_key_from_title_or_address() -> None:
     source = KijijiSource(now_provider=_fixed_now)
     context = _build_context()

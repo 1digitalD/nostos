@@ -4,18 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Nostos{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">Nostos</a>
-    <span class="meta">profile: {{ profile_id }}</span>
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="Nostos listings">
+        <span class="brand-mark" aria-hidden="true">N</span>
+        <span>Nostos</span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <a href="/">Listings</a>
+        <a href="/profile">Criteria</a>
+        <span class="workspace-chip">{{ profile_id }}</span>
+      </nav>
+    </div>
   </header>
   <main class="container">
     {% block content %}{% endblock %}
   </main>
   <footer class="footer">
-    <span>Single-user search workspace · access follows this host's network controls</span>
+    <span>Private rental decision workspace</span>
+    <span>Data stays on this host</span>
   </footer>
 </body>
 </html>

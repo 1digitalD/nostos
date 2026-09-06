@@ -116,7 +116,7 @@ class KijijiSource:
     def to_listing(self, rec: SourceRecord, ctx: SearchContext) -> Listing:
         payload = _mapping_payload(rec.payload)
         observed_at = rec.fetched_at
-        title = _as_text(payload.get("title")) or ""
+        title = _clean_listing_title(_as_text(payload.get("title")) or "")
         description = _as_text(payload.get("description"))
         address = _as_text(payload.get("address"))
         price = _as_int(payload.get("price"))
@@ -411,6 +411,23 @@ def _image_urls(raw_value: object) -> list[str]:
                 urls.append(item.strip())
         return urls
     return []
+
+
+def _clean_listing_title(title: str) -> str:
+    """Remove Kijiji page-title chrome from a listing's actual title."""
+
+    cleaned = title.strip()
+    for marker in (
+        " | Long Term Rentals |",
+        " | Apartments & Condos for Rent |",
+        " | Real Estate |",
+    ):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0].strip()
+            break
+    if cleaned.endswith(" - Kijiji"):
+        cleaned = cleaned.removesuffix(" - Kijiji").strip()
+    return cleaned
 
 
 def _photo_list(raw_value: object) -> list[Photo]:
