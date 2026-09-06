@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import quote_plus, urlencode
 
+import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +48,7 @@ from nostos.web.query import (
     rule_rows_from_breakdown,
     sort_label,
 )
+from nostos.web.research import nearby_places
 from nostos.workflows import (
     CorrectionField,
     ManualListing,
@@ -98,6 +101,8 @@ _LIST_PARAMS: tuple[str, ...] = (
     "show_excluded",
     "sort",
 )
+
+_CITY_PORTS: dict[str, int] = {"vancouver": 8421, "toronto": 8422}
 
 
 
@@ -155,6 +160,89 @@ def _render_money_short(value: float | None) -> str:
     if value >= 1000:
         return f"${value / 1000:.2f}k"
     return f"${value:.0f}"
+
+
+def _google_search_url(subject: str, topic: str) -> str:
+    query = quote_plus(f'"{subject[:160]}" {topic}'.strip())
+    return f"https://www.google.com/search?q={query}&tbs=qdr:y"
+
+
+def _maps_search_url(subject: str, topic: str) -> str:
+    query = quote_plus(f"{topic} near {subject[:160]}")
+    return f"https://www.google.com/maps/search/?api=1&query={query}"
+
+
+def _research_sections(subject: str, city: str) -> list[dict[str, object]]:
+    official_domain = "toronto.ca" if city == "toronto" else "vancouver.ca"
+    return [
+        {
+            "title": "Address and building",
+            "description": (
+                "Current references for the address, building operator, and resident experience."
+            ),
+            "links": [
+                ("Current address results", _google_search_url(subject, "")),
+                ("Building management", _google_search_url(subject, "property management")),
+                ("Recent resident reviews", _google_search_url(subject, "building reviews")),
+            ],
+        },
+        {
+            "title": "Area and locality",
+            "description": (
+                "Neighbourhood context and recent local changes that may affect daily life."
+            ),
+            "links": [
+                ("Neighbourhood overview", _google_search_url(subject, "neighbourhood")),
+                ("Recent local news", _google_search_url(subject, "neighbourhood news")),
+                (
+                    "Official city information",
+                    _google_search_url(subject, f"site:{official_domain}"),
+                ),
+            ],
+        },
+        {
+            "title": "Safety and building concerns",
+            "description": (
+                "Recent incident and maintenance searches. Verify claims against official records."
+            ),
+            "links": [
+                ("Recent incidents", _google_search_url(subject, "police OR fire OR incident")),
+                (
+                    "Maintenance concerns",
+                    _google_search_url(subject, "maintenance OR elevator OR bedbugs"),
+                ),
+                (
+                    "Official safety records",
+                    _google_search_url(subject, f"site:{official_domain} safety"),
+                ),
+            ],
+        },
+        {
+            "title": "Daily services and shopping",
+            "description": (
+                "Current map listings around the address; confirm walking routes and opening hours."
+            ),
+            "links": [
+                ("Gyms", _maps_search_url(subject, "gym")),
+                ("Grocery stores", _maps_search_url(subject, "grocery store")),
+                ("Shopping", _maps_search_url(subject, "shopping")),
+                ("Pharmacies and clinics", _maps_search_url(subject, "pharmacy clinic")),
+            ],
+        },
+        {
+            "title": "Parks and access",
+            "description": "Nearby green space and transit access from the listed address.",
+            "links": [
+                ("Parks", _maps_search_url(subject, "park")),
+                ("Transit stops", _maps_search_url(subject, "public transit")),
+                ("Bike services", _maps_search_url(subject, "bike share")),
+            ],
+        },
+    ]
+
+
+def _looks_like_street_address(value: str) -> bool:
+    return re.search(r"\b\d{1,6}\s+[A-Za-z]", value) is not None
 
 
 class AppState:
@@ -256,6 +344,15 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
     )
     app.state.nostos = state
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    @app.get("/switch-city/{city}")
+    def switch_city(city: str, request: Request) -> RedirectResponse:
+        port = _CITY_PORTS.get(city.casefold())
+        if port is None:
+            raise HTTPException(status_code=404, detail="Unsupported city")
+        hostname = request.url.hostname or "127.0.0.1"
+        scheme = request.url.scheme
+        return RedirectResponse(url=f"{scheme}://{hostname}:{port}/", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
     def index(
@@ -513,14 +610,6 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "FROM source_record GROUP BY source ORDER BY source"
             ).fetchall()
         subject = (row.address or row.title or listing_id).strip()
-        terms = f'"{subject[:140]}" {row.rent_text} rental'
-        query = quote_plus(terms)
-        sites = (
-            {"label": "Search the open web", "site": "Google", "url": f"https://www.google.com/search?q={query}"},
-            {"label": "Check Kijiji", "site": "Kijiji", "url": f"https://www.google.com/search?q=site%3Akijiji.ca+{query}"},
-            {"label": "Check Rentals.ca", "site": "Rentals.ca", "url": f"https://www.google.com/search?q=site%3Arentals.ca+{query}"},
-            {"label": "Check Realtor.ca", "site": "Realtor.ca", "url": f"https://www.google.com/search?q=site%3Arealtor.ca+{query}"},
-        )
         return state.templates.TemplateResponse(
             request=request,
             name="research.html",
@@ -528,7 +617,9 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "row": row,
                 "listing_id": listing_id,
                 "related": related,
-                "research_links": sites,
+                "research_subject": subject,
+                "research_subject_precise": _looks_like_street_address(subject),
+                "research_sections": _research_sections(subject, state.context.profile.city),
                 "checked_records": checked_records,
                 "source_counts": [
                     {"source": str(item["source"]), "count": int(item["count"])}
@@ -538,6 +629,37 @@ def create_app(*, db_path: Path, profile_path: Path, citypack_path: Path) -> Fas
                 "profile_id": state.profile_id,
             },
         )
+
+    @app.get("/listings/{listing_id}/nearby.json", response_class=JSONResponse)
+    def nearby_listing(listing_id: str, state: StateDep) -> JSONResponse:
+        with state.connect() as conn:
+            row = load_detail(
+                conn,
+                listing_id=listing_id,
+                context=state.context,
+                profile_id=state.profile_id,
+                sources=state.sources,
+            )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        point = row.listing.place.point
+        if point is None:
+            return JSONResponse(
+                {"status": "unavailable", "message": "No source map pin is available."}
+            )
+        try:
+            result = nearby_places(round(point.lat, 5), round(point.lng, 5))
+        except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError):
+            return JSONResponse(
+                {
+                    "status": "unavailable",
+                    "message": (
+                        "Nearby place data is temporarily unavailable. "
+                        "Use the map searches below."
+                    ),
+                }
+            )
+        return JSONResponse(result)
 
     @app.get("/profile", response_class=HTMLResponse)
     def profile_view(

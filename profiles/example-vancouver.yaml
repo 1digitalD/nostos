@@ -23,10 +23,15 @@ hard:
   exclude:
     - basement
     - furnished_only
+  require_laundry: true
+  require_parking: true
 weights:
   laundry.in_suite: 10
   laundry.building: -6
   parking.available: 8
+  amenities.gym_building: 4
+  proximity.gym_nearby: 5
+  proximity.grocery_nearby: 6
   pets.allowed: -10
   floor.low: 6
   walk.score: 4

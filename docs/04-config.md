@@ -149,6 +149,7 @@ one-sentence description that the profile editor shows next to its weight field.
 | `laundry.in_suite` | amenities | washer/dryer inside the unit |
 | `laundry.building` | amenities | only shared / coin-op / on-site laundry |
 | `parking.available` | amenities | parking stated as included or available |
+| `amenities.gym_building` | amenities | an on-site or equipped building gym is stated |
 | `pets.allowed` | amenities | pet policy stated (1.0 welcome, 0.5 considered, 0 no pets) |
 | `photo.present` | amenities | at least one photo on the listing |
 | `floor.low` | space | floor stated or inferred from unit number; lower scores higher |
@@ -158,6 +159,8 @@ one-sentence description that the profile editor shows next to its weight field.
 | `walk.score` | proximity | a Walk Score is stated |
 | `density.walkable` | proximity | walkable-neighbourhood phrases |
 | `density.sparse` | proximity | low-density / suburban phrases |
+| `proximity.gym_nearby` | proximity | a gym is stated as nearby or walkable |
+| `proximity.grocery_nearby` | proximity | groceries are stated as nearby or walkable |
 
 Neighbourhood preference is not a rule: it is `area_key_weights`, added by the engine
 as a `location.area_key` contribution.

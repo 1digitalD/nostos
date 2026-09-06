@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Nostos{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
+  {% set active_city = request.app.state.nostos.context.profile.city %}
   <header class="topbar">
     <div class="topbar-inner">
       <a class="brand" href="/" aria-label="Nostos listings">
@@ -16,7 +17,13 @@
       <nav class="primary-nav" aria-label="Primary navigation">
         <a href="/">Listings</a>
         <a href="/profile">Criteria</a>
-        <span class="workspace-chip">{{ profile_id }}</span>
+        <details class="city-switcher">
+          <summary>{{ active_city|title }}</summary>
+          <div class="city-menu">
+            <a href="/switch-city/toronto" {% if active_city == 'toronto' %}aria-current="page"{% endif %}>Toronto</a>
+            <a href="/switch-city/vancouver" {% if active_city == 'vancouver' %}aria-current="page"{% endif %}>Vancouver</a>
+          </div>
+        </details>
       </nav>
     </div>
   </header>

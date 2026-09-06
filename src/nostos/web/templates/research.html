@@ -5,7 +5,7 @@
 
 <article class="research-workspace">
   <header class="research-hero">
-    <div><span class="status-badge status-match">Scan complete</span><h1>Research this apartment</h1><p>{{ row.title or row.address or row.listing_id }}</p></div>
+    <div><span class="status-badge status-match">Research ready</span><h1>Research this address</h1><p>{{ research_subject }}</p></div>
     <a class="btn btn-secondary" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">Open original listing</a>
   </header>
 
@@ -17,6 +17,30 @@
 
   <div class="research-layout">
     <main class="research-main">
+      <section class="detail-section">
+        <div class="section-heading"><div><h2>Address research</h2><p>Searches begin with the address only. Time-sensitive web searches are limited to the past year.</p></div></div>
+        {% if not research_subject_precise %}
+          <div class="research-caution" role="note"><strong>The listing does not expose a precise street address.</strong><span>These searches use the available locality or postal code, so building-level conclusions need verification.</span></div>
+        {% endif %}
+        <div class="research-topics">
+          {% for section in research_sections %}
+            <article class="research-topic">
+              <h3>{{ section.title }}</h3>
+              <p>{{ section.description }}</p>
+              <div class="research-topic-links">
+                {% for label, url in section.links %}<a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ label }} <span aria-hidden="true">↗</span></a>{% endfor %}
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="detail-section" id="nearby-places" data-endpoint="/listings/{{ row.listing_id }}/nearby.json">
+        <div class="section-heading"><div><h2>Nearby places</h2><p>Named places within 1.5 km of the source map pin, loaded from current OpenStreetMap data.</p></div></div>
+        <p class="nearby-status" role="status" aria-live="polite">Checking nearby gyms, groceries, parks, shopping, services, and transit…</p>
+        <div class="nearby-groups" hidden></div>
+      </section>
+
       <section class="detail-section">
         <div class="section-heading"><div><h2>Possible matching advertisements</h2><p>Matches require shared photos or multiple identical unit facts.</p></div></div>
         {% if related %}
@@ -35,14 +59,6 @@
         {% endif %}
       </section>
 
-      <section class="detail-section">
-        <div class="section-heading"><div><h2>Search live sources</h2><p>Each link uses the address and rent from this listing to reduce broad results.</p></div></div>
-        <div class="research-links">
-          {% for item in research_links %}
-            <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer"><span>{{ item.site }}</span><strong>{{ item.label }}</strong><small>Opens focused search</small></a>
-          {% endfor %}
-        </div>
-      </section>
     </main>
 
     <aside class="research-aside">
@@ -51,4 +67,35 @@
     </aside>
   </div>
 </article>
+
+<script>
+(function () {
+  var section = document.getElementById('nearby-places');
+  if (!section) return;
+  var status = section.querySelector('.nearby-status');
+  var groups = section.querySelector('.nearby-groups');
+  var labels = { gyms: 'Gyms', groceries: 'Groceries', parks: 'Parks', shopping: 'Shopping', services: 'Health services', transit: 'Transit' };
+  fetch(section.dataset.endpoint, { headers: { 'Accept': 'application/json' } })
+    .then(function (response) { if (!response.ok) throw new Error('request failed'); return response.json(); })
+    .then(function (data) {
+      if (data.status !== 'ok') throw new Error(data.message || 'Nearby place data is unavailable.');
+      Object.keys(labels).forEach(function (key) {
+        var places = data.groups[key] || [];
+        var card = document.createElement('article'); card.className = 'nearby-group';
+        var heading = document.createElement('h3'); heading.textContent = labels[key]; card.appendChild(heading);
+        if (!places.length) { var empty = document.createElement('p'); empty.textContent = 'No named result in this radius.'; card.appendChild(empty); }
+        places.forEach(function (place) {
+          var link = document.createElement('a'); link.href = place.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+          var name = document.createElement('span'); name.textContent = place.name;
+          var distance = document.createElement('strong'); distance.textContent = place.distance_km.toFixed(2) + ' km';
+          link.appendChild(name); link.appendChild(distance); card.appendChild(link);
+        });
+        groups.appendChild(card);
+      });
+      groups.hidden = false;
+      status.textContent = 'Nearby place scan complete. Distances are straight-line estimates from the source map pin.';
+    })
+    .catch(function (error) { status.classList.add('is-error'); status.textContent = error.message || 'Nearby place data is temporarily unavailable. Use the map searches above.'; });
+})();
+</script>
 {% endblock %}

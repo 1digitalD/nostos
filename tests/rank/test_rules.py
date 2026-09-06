@@ -175,6 +175,26 @@ def test_den_or_solarium_detector_fires_with_matched_phrase() -> None:
     assert den.magnitude == pytest.approx(1.0)
 
 
+def test_building_and_nearby_amenity_detectors_are_distinct() -> None:
+    listing = _make_listing(
+        description=(
+            "A fully-equipped fitness centre is in the building. "
+            "Walk to a grocery store and gym nearby."
+        )
+    )
+
+    building_gym = _detect("amenities.gym_building", listing)
+    nearby_gym = _detect("proximity.gym_nearby", listing)
+    nearby_grocery = _detect("proximity.grocery_nearby", listing)
+
+    assert building_gym is not None
+    assert nearby_gym is not None
+    assert nearby_grocery is not None
+    assert "fitness centre" in (building_gym.evidence or "")
+    assert "gym nearby" in (nearby_gym.evidence or "")
+    assert "grocery store" in (nearby_grocery.evidence or "")
+
+
 def test_walkable_phrase_detector_wins_when_both_phrase_types_exist() -> None:
     listing = _make_listing(
         description=(

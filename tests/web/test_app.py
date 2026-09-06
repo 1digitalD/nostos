@@ -109,6 +109,24 @@ def test_create_app_loads(tmp_path: Path) -> None:
     assert "/listings/{listing_id}/dismiss" in paths
     assert "/listings/{listing_id}/contacted" in paths
     assert "/listings/{listing_id}/note" in paths
+    assert "/listings/{listing_id}/nearby.json" in paths
+    assert "/switch-city/{city}" in paths
+
+
+def test_city_switch_uses_isolated_workspace_ports(tmp_path: Path) -> None:
+    client, _, _ = _client(tmp_path)
+
+    index = client.get("/")
+    assert "Vancouver listings ranked" in index.text
+    assert ">Vancouver</summary>" in index.text
+
+    toronto = client.get("/switch-city/toronto", follow_redirects=False)
+    vancouver = client.get("/switch-city/vancouver", follow_redirects=False)
+
+    assert toronto.status_code == 303
+    assert toronto.headers["location"] == "http://testserver:8422/"
+    assert vancouver.headers["location"] == "http://testserver:8421/"
+    assert client.get("/switch-city/montreal", follow_redirects=False).status_code == 404
 
 
 def test_static_export_writes_html_file(tmp_path: Path) -> None:

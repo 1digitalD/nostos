@@ -171,6 +171,24 @@ _WALKABLE_PHRASE_RE = re.compile(
     r"walk\s+to\s+everything)\b",
     re.IGNORECASE,
 )
+_BUILDING_GYM_RE = re.compile(
+    r"\b(?:well[\s-]equipped|fully[\s-]equipped|state[\s-]of[\s-]the[\s-]art|"
+    r"on[\s-]site|in[\s-]building|building)\s+(?:gym|fitness\s+(?:centre|center|room))\b|"
+    r"\b(?:gym|fitness\s+(?:centre|center|room))\s+(?:in|inside)\s+(?:the\s+)?building\b",
+    re.IGNORECASE,
+)
+_NEARBY_GYM_RE = re.compile(
+    r"\b(?:gym|fitness\s+(?:centre|center|studio))\s+(?:nearby|close\s+by|steps?\s+away|"
+    r"within\s+walking\s+distance)\b|\b(?:steps?|walk)\s+(?:to|from)\s+(?:a\s+)?(?:gym|"
+    r"fitness\s+(?:centre|center|studio))\b",
+    re.IGNORECASE,
+)
+_NEARBY_GROCERY_RE = re.compile(
+    r"\b(?:grocery|groceries|supermarket)\s+(?:nearby|close\s+by|steps?\s+away|"
+    r"within\s+walking\s+distance)\b|\b(?:steps?|walk)\s+(?:to|from)\s+(?:a\s+)?"
+    r"(?:grocery\s+store|supermarket|groceries)\b",
+    re.IGNORECASE,
+)
 _SPARSE_PHRASE_RE = re.compile(
     r"\b(suburban|single[\s-]family|tree[\s-]lined\s+street|"
     r"primarily\s+residential|residential\s+area|cul[\s-]de[\s-]sac|"
@@ -624,6 +642,48 @@ def _detect_den_or_solarium(listing: Listing, _: RuleContext) -> Signal | None:
     if match is None:
         return None
     return _signal_from_presence(match.group(0).strip())
+
+
+@rule(
+    "amenities.gym_building",
+    category="amenities",
+    label="Equipped gym in building",
+    description=(
+        "Fires when the listing states that the building has an on-site or equipped gym. "
+        "Use this as a bonus on top of neighbourhood gym access."
+    ),
+)
+def _detect_building_gym(listing: Listing, _: RuleContext) -> Signal | None:
+    match = _BUILDING_GYM_RE.search(_combined_text(listing))
+    return _signal_from_presence(match.group(0).strip()) if match else None
+
+
+@rule(
+    "proximity.gym_nearby",
+    category="proximity",
+    label="Gym nearby",
+    description=(
+        "Fires when the listing explicitly says a gym or fitness centre is nearby or walkable. "
+        "Confirm the actual route in the research workspace."
+    ),
+)
+def _detect_nearby_gym(listing: Listing, _: RuleContext) -> Signal | None:
+    match = _NEARBY_GYM_RE.search(_combined_text(listing))
+    return _signal_from_presence(match.group(0).strip()) if match else None
+
+
+@rule(
+    "proximity.grocery_nearby",
+    category="proximity",
+    label="Grocery nearby",
+    description=(
+        "Fires when the listing explicitly says groceries or a supermarket are nearby or walkable. "
+        "Confirm the actual route in the research workspace."
+    ),
+)
+def _detect_nearby_grocery(listing: Listing, _: RuleContext) -> Signal | None:
+    match = _NEARBY_GROCERY_RE.search(_combined_text(listing))
+    return _signal_from_presence(match.group(0).strip()) if match else None
 
 
 @rule(
