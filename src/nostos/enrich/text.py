@@ -803,14 +803,14 @@ def _text_attribute_value(listing: Listing, key: str) -> str | None:
 
 
 def _is_missing(field: Field[Any]) -> bool:
-    return isinstance(field, Absence)
+    return field == Absence.NOT_STATED
 
 
 def _attribute_is_fillable(listing: Listing, key: str) -> bool:
     value = listing.attributes.get(key)
     if value is None:
         return True
-    return isinstance(value, Absence)
+    return value == Absence.NOT_STATED
 
 
 def _context_currency(context: object) -> str:

@@ -313,7 +313,7 @@ def test_compile_web_research_rejects_result_with_multiple_distinct_addresses() 
 
 
 def test_compile_web_research_filters_stale_future_and_undated_results() -> None:
-    today = date.today()
+    today = datetime.now(UTC).date()
     provider = _ResearchProvider(
         [
             _finding(

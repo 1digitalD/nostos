@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
-from test_profile_page import _seed_listing, _seed_profile_and_citypack
 
 from nostos.store.db import connect
 from nostos.store.repo import ResearchRepo
 from nostos.web.app import create_app
+from tests.web.test_profile_page import _seed_listing, _seed_profile_and_citypack
 
 
 class EvidenceProvider:

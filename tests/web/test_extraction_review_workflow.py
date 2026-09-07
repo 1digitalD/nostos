@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
-from test_profile_page import _seed_profile_and_citypack
 
 from nostos.model.source_record import SourceRecord
 from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ListingRepo, ScoreRepo
 from nostos.web import create_app
+from tests.web.test_profile_page import _seed_profile_and_citypack
 
 LISTING_ID = "craigslist:extraction-review-1"
 

@@ -483,7 +483,7 @@ def _build_list_row(
         classified = classify_match_status(listing, context.profile)
     else:
         classified = MatchStatus(status="unverified", reasons=("no profile loaded",))
-    match_status = "excluded" if excluded else classified.status
+    match_status = "excluded" if excluded else classified.evidence_status
     return ListRow(
         listing_id=listing_id,
         title=title,
@@ -508,7 +508,10 @@ def _build_list_row(
         parking=parking,
         available=available,
         match_status=match_status,
-        match_reasons=classified.reasons,
+        match_reasons=(
+            tuple(check.reason for check in classified.checks if check.status != "pass")
+            if classified.checks else classified.reasons
+        ),
         starred=starred,
         dismissed=dismissed,
         category_scores=category_scores if extraction_current else (),

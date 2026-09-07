@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from test_profile_page import _seed_profile_and_citypack
 
 from nostos.model.source_record import SourceRecord
 from nostos.sources.craigslist import CraigslistSource
@@ -18,6 +17,7 @@ from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ListingRepo
 from nostos.web import create_app
 from nostos.workflows import correct_listing_fact
+from tests.web.test_profile_page import _seed_profile_and_citypack
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "craigslist"
 LISTING_ID = "craigslist:detail-refresh-1"

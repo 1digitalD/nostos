@@ -190,6 +190,27 @@ def explain(
 
 
 @mcp.tool()
+def decision(
+    listing_id: str,
+    profile: str | None = None,
+    db: str | None = None,
+    citypack: str | None = None,
+    json: bool = False,
+) -> str:
+    """Read a saved listing decision brief. Wraps `nostos decision`."""
+
+    argv = ["decision", listing_id]
+    if profile is not None:
+        _append_option(argv, "--profile", profile)
+    if db is not None:
+        _append_option(argv, "--db", db)
+    if citypack is not None:
+        _append_option(argv, "--citypack", citypack)
+    _append_flag(argv, "--json", enabled=json)
+    return _invoke_cli(argv)
+
+
+@mcp.tool()
 def profile_get(profile: str | None = None) -> str:
     """Read criteria and the revision required to safely preview or apply changes."""
     argv = ["profile-get"]

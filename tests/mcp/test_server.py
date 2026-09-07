@@ -10,7 +10,8 @@ from nostos.mcp import server as mcp_server
 CLI_COMMANDS = frozenset(
     {
         "init", "watch", "rank", "list", "explain",
-        "profile_get", "profile_preview", "profile_apply", "profile_history", "profile_undo",
+        "decision", "profile_get", "profile_preview", "profile_apply", "profile_history",
+        "profile_undo",
     }
 )
 
@@ -42,6 +43,7 @@ TOOL_CLI_FLAGS: dict[str, frozenset[str]] = {
     "rank": frozenset({"profile", "db", "citypack"}),
     "list": frozenset({"profile", "db", "citypack", "limit"}),
     "explain": frozenset({"listing_id", "profile", "db"}),
+    "decision": frozenset({"listing_id", "profile", "db", "citypack", "json"}),
     "profile_get": frozenset({"profile"}),
     "profile_preview": frozenset({"patch_json", "profile", "db"}),
     "profile_apply": frozenset({"patch_json", "expected_revision", "profile", "db"}),
@@ -203,5 +205,38 @@ def test_explain_tool_invokes_cli_with_listing_id(monkeypatch: pytest.MonkeyPatc
             "craigslist:abc123",
             "--profile",
             "/tmp/profile.yaml",
+        ]
+    ]
+
+
+def test_decision_tool_invokes_cli_with_expected_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+
+    def fake_invoke(argv: list[str]) -> str:
+        captured.append(list(argv))
+        return "ok"
+
+    monkeypatch.setattr(mcp_server, "_invoke_cli", fake_invoke)
+
+    result = mcp_server.decision(
+        "stub:abc123",
+        profile="/tmp/profile.yaml",
+        db="/tmp/nostos.db",
+        citypack="/tmp/citypack.yaml",
+        json=True,
+    )
+
+    assert result == "ok"
+    assert captured == [
+        [
+            "decision",
+            "stub:abc123",
+            "--profile",
+            "/tmp/profile.yaml",
+            "--db",
+            "/tmp/nostos.db",
+            "--citypack",
+            "/tmp/citypack.yaml",
+            "--json",
         ]
     ]

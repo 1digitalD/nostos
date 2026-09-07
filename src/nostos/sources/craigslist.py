@@ -54,7 +54,10 @@ _ID_RE = re.compile(r"/([A-Za-z0-9]+)(?:[?#].*)?$")
 _PRICE_RE = re.compile(r"\$([\d,]+)")
 _BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*br\b", re.IGNORECASE)
 _BATHS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)s?\b", re.IGNORECASE)
-_SQFT_RE = re.compile(r"(\d{3,5})\s*(?:ft2|sq\.?\s*ft|sqft|square\s*feet)\b", re.IGNORECASE)
+_SQFT_RE = re.compile(
+    r"(\d{3,5})\s*(?:ft\s*2|sq\.?\s*ft|sqft|square\s*feet)\b",
+    re.IGNORECASE,
+)
 class CraigslistRobotsBlockedError(Exception):
     """Raised when robots.txt refused every discovery URL for every configured area.
 
@@ -324,10 +327,19 @@ class CraigslistSource:
         evidence_text = " ".join(
             part for part in (title, description, source_attributes) if part
         )
+        area_from_source_attributes = False
+        area_evidence = "craigslist area"
         if has_ambiguous_bedroom_range(evidence_text):
             beds = None
         if has_ambiguous_area_range(evidence_text):
             sqft = None
+        elif sqft is None and source_attributes:
+            source_area_match = _SQFT_RE.search(source_attributes)
+            if source_area_match is not None:
+                sqft = _coerce_float(source_area_match.group(1))
+                area_from_source_attributes = sqft is not None and sqft > 0
+                if area_from_source_attributes:
+                    area_evidence = source_area_match.group(0).strip()
         floor_fact = floor_from_text(evidence_text)
         parking_fact = parking_from_text(evidence_text)
         furnishing_fact = furnishing_from_text(evidence_text)
@@ -410,7 +422,8 @@ class CraigslistSource:
                 sqft,
                 observed_at=observed_at,
                 unit=ctx.citypack.locale.area_unit,
-                origin=origin,
+                origin=Origin.DETAIL_PAGE if area_from_source_attributes else origin,
+                evidence=area_evidence,
             ),
             floor=_int_field(
                 floor_fact[0] if floor_fact is not None else None,
@@ -947,14 +960,15 @@ def _area_field(
     observed_at: datetime,
     unit: str,
     origin: Origin,
+    evidence: str,
 ) -> Observed[Area] | Absence:
-    if value is None:
+    if value is None or value <= 0:
         return Absence.NOT_STATED
     return Observed[Area](
         value=Area(value=float(value), unit=unit),
         origin=origin,
         confidence=1.0,
-        evidence="craigslist area",
+        evidence=evidence,
         observed_at=observed_at,
     )
 

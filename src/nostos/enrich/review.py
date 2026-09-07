@@ -26,7 +26,10 @@ from nostos.sources.base import Source
 from nostos.store.db import apply_migrations
 from nostos.store.repo import ListingRepo, ObservationRepo, ScoreRepo
 
-EXTRACTION_REVISION = "saved-content-v1"
+# v2 invalidates applied v1 snapshots after deterministic source-evidence fixes:
+# zero-area normalization, structured parking, explicit unit scope, and saved
+# Craigslist attribute-area recovery. Existing rows require a fresh review.
+EXTRACTION_REVISION = "saved-content-v2"
 _CORE_FACT_FIELDS = ("rent", "beds", "baths", "area", "floor", "parking", "furnishing")
 
 

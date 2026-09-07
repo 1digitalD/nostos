@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from test_profile_page import _client, _seed_listing, _valid_form
 
 from nostos.config.profile import Landmark, Profile, load_profile
 from nostos.enrich.location import distance_km, point_from_html
@@ -19,6 +18,7 @@ from nostos.model import (
 from nostos.rank.criteria import classify_match_status
 from nostos.rank.engine import RankEngine
 from nostos.store.db import connect
+from tests.web.test_profile_page import _client, _seed_listing, _valid_form
 
 
 def test_rogers_centre_point_and_proximity_score() -> None:

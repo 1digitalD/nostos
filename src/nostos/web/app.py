@@ -604,6 +604,8 @@ def create_app(
         corrected: bool = False,
         extracted: bool = False,
     ) -> HTMLResponse:
+        from nostos.decision import build_decision_brief
+
         with state.connect() as conn:
             row = load_detail(
                 conn,
@@ -655,6 +657,11 @@ def create_app(
             name="detail.html",
             context={
                 "row": row,
+                "decision": build_decision_brief(
+                    row.listing, state.context.profile,
+                    extraction_current=row.extraction_current,
+                    excluded=action_state["excluded"], dismissed=action_state["dismissed"],
+                ),
                 "listing_id": listing_id,
                 "actions": actions,
                 "action_state": action_state,

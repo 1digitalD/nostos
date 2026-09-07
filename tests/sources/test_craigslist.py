@@ -14,7 +14,7 @@ from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext, SourceScanState
 from nostos.enrich.text import recover_missing_attributes
-from nostos.model import Absence, Area, Money, Observed, SourceRecord
+from nostos.model import Absence, Area, Money, Observed, Origin, SourceRecord
 from nostos.sources.base import Liveness
 from nostos.sources.craigslist import (
     CraigslistRobotsBlockedError,
@@ -296,6 +296,49 @@ def test_attribute_only_parking_and_laundry_survive_adapter_conversion(
     laundry = updates[expected_laundry]
     assert isinstance(laundry, Observed)
     assert laundry.value is True
+
+
+def test_to_listing_recovers_area_from_saved_source_attributes() -> None:
+    record = SourceRecord(
+        source="craigslist",
+        source_id="SavedArea1",
+        url="https://vancouver.craigslist.org/van/apa/d/SavedArea1.html",
+        content_hash="saved-area-hash",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "Bright two bedroom apartment",
+            "description": "Quiet home near transit.",
+            "source_attributes": "2BR / 1Ba 800ft 2 rent period: monthly",
+            "price": 2400,
+        },
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+
+    assert isinstance(listing.area, Observed)
+    assert listing.area.value == Area(value=800, unit="sqft")
+    assert listing.area.origin is Origin.DETAIL_PAGE
+    assert listing.area.evidence == "800ft 2"
+
+
+def test_to_listing_treats_zero_floor_area_as_unstated() -> None:
+    record = SourceRecord(
+        source="craigslist",
+        source_id="ZeroArea1",
+        url="https://vancouver.craigslist.org/van/apa/d/ZeroArea1.html",
+        content_hash="zero-area-hash",
+        fetched_at=FIXED_NOW,
+        payload={
+            "title": "Bright apartment",
+            "description": "Quiet home near transit.",
+            "sqft": 0,
+            "price": 2200,
+        },
+    )
+
+    listing = CraigslistSource(now=lambda: FIXED_NOW).to_listing(record, _build_context())
+
+    assert listing.area == Absence.NOT_STATED
 
 
 def test_fetch_detail_preserves_discovery_fields_and_records_complete_status() -> None:

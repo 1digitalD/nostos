@@ -187,6 +187,23 @@ nostos profile-undo REVISION_ID --profile ~/.config/nostos/toronto.yaml \
   --expected-revision CURRENT_REVISION
 ```
 
+### Saved-evidence decision brief
+
+Open a saved listing to see supported requirements, unanswered questions, source
+age, and conflicting claims. Use **Correct a fact** to update the assessment;
+corrections survive extraction review and can be reset. No AI account is needed.
+This is an evidence-checking pilot, not verified rental advice.
+
+Agents and scripts can read the same brief without fetching or changing listings:
+
+```bash
+nostos decision LISTING_ID --profile ~/.config/nostos/toronto.yaml --json
+```
+
+The MCP `decision` tool supports the same options. See the
+[pilot scope and validation gates](docs/19-saved-evidence-pilot.md) for what is
+implemented and what remains before model-assisted interpretation and live rollout.
+
 ## Development
 
 ```bash

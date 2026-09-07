@@ -14,8 +14,8 @@
   <header class="detail-hero">
     <div class="detail-hero-copy">
       <div class="detail-context">
-        <span class="status-badge status-{{ row.match_status }}" title="{{ row.match_reasons_text or status_titles[row.match_status] }}">
-          {% if row.match_status == 'match' %}Match{% elif row.match_status == 'unverified' %}Unverified{% elif row.match_status == 'miss' %}Miss{% else %}Excluded{% endif %}
+        <span class="status-badge status-{{ decision.status }}" title="{{ decision.headline }}">
+          {% if decision.status == 'match' %}Saved facts fit{% elif decision.status == 'unverified' %}Unverified{% elif decision.status == 'miss' %}Miss{% elif decision.status == 'dismissed' %}Dismissed{% else %}Excluded{% endif %}
         </span>
         <span class="source-tag source-{{ row.source }}">{{ row.source }}</span>
         <span>Updated {{ row.posted_at | relativetime }}</span>
@@ -33,18 +33,28 @@
     <div><span>Interior</span><strong>{% if row.area_value is not none %}{{ row.area_value | round(0, 'floor') | int }} {{ row.area_unit or 'sqft' }}{% else %}—{% endif %}</strong></div>
   </div>
 
+  <section class="detail-section decision-brief" aria-labelledby="decision-title">
+    <h2 id="decision-title">{{ decision.headline }}</h2>
+    <p>Based on saved source claims and your corrections—not independent verification. Extraction can miss conflicts, room-only rentals, or bedroom/office distinctions. Check the original before deciding to view.</p>
+    {% if decision.blockers %}
+    <h3>{{ 'Last saved facts outside your requirements' if decision.stale else 'Outside your requirements' }}</h3>
+    <ul>{% for reason in decision.blockers %}<li>{{ reason }}</li>{% endfor %}</ul>
+    {% endif %}
+    <h3>What to confirm</h3>
+    <ul>{% for question in decision.questions %}<li>{{ question }}</li>{% endfor %}</ul>
+    {% for check in decision.checks if check.status == 'unknown' and check.evidence %}
+    <details><summary>Saved evidence to clarify: {{ check.field|replace('_', ' ') }}</summary><blockquote>{{ check.evidence }}</blockquote></details>
+    {% endfor %}
+    {% if decision.stale or not row.extraction_current %}<p><a href="#review-details">Update or review listing details</a></p>{% endif %}
+    <p>{{ 'Entry saved' if row.source == 'manual' else 'Source captured' }} <time datetime="{{ decision.captured_at.isoformat() }}">{{ decision.captured_at.strftime('%b %d, %Y at %H:%M %Z') }}</time>. This is not an availability check.</p>
+    <p><a href="#listing-evidence">Review saved evidence</a> · <a href="#correct-facts">Correct a fact</a> · <a href="/profile">Edit your criteria</a></p>
+  </section>
+
   <section class="research-panel research-panel-mobile">
     <h2>Verify before deciding</h2>
     <p>Scan saved source records for likely matches, then check live rental sites with a focused query.</p>
     <a class="btn btn-primary btn-large" href="/listings/{{ row.listing_id }}/research">Open research workspace</a>
   </section>
-
-  {% if row.match_reasons %}
-    <div class="decision-alert status-{{ row.match_status }}" role="note">
-      <strong>{{ status_titles[row.match_status] }}</strong>
-      <ul>{% for reason in row.match_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
-    </div>
-  {% endif %}
 
   {% if extracted %}<p class="profile-banner profile-banner-ok" role="status">Extracted details applied. Facts and ranking are updated; your corrections are preserved.</p>{% endif %}
 
@@ -61,7 +71,7 @@
         {% if row.photos|length > 5 %}<details class="source-description"><summary>View all {{ row.photos|length }} photos</summary><div class="remaining-photos">{% for photo in row.photos[5:] %}<a href="{{ photo.url }}" target="_blank" rel="noopener noreferrer"><img src="{{ photo.url }}" alt="{{ photo.caption or 'Additional listing photo' }}" loading="lazy"></a>{% endfor %}</div></details>{% endif %}
       {% else %}<div class="photo-empty">No photos captured. Update listing details to check the source.</div>{% endif %}
 
-      <section class="detail-section">
+      <section class="detail-section" id="listing-evidence">
         <div class="section-heading">
           <div><h2>What the listing says</h2><p>Extracted facts. Unstated items stay visible so you know what to verify.</p></div>
           <a href="{{ row.url }}" rel="noopener noreferrer" target="_blank">Open original</a>
@@ -82,7 +92,7 @@
 
       {% include "_floorplan.html" %}
 
-      <section class="detail-section extraction-section">
+      <section class="detail-section extraction-section" id="review-details">
         <div class="section-heading"><div><h2>Check extracted details</h2><p>Review what can be recovered from the saved listing text before applying changes.</p></div></div>
         <div class="extraction-actions">{% if row.source != 'manual' %}<button type="button" class="btn btn-primary" id="refresh-details" data-listing="{{ row.listing_id }}">Update listing details</button>{% endif %}<a class="btn btn-secondary" href="/listings/{{ row.listing_id }}/extraction-review">Review extracted details</a></div>
         {% if row.source == 'manual' %}<p>This manually added listing supports saved-content review and fact corrections.</p>{% else %}<p>Update fetches the source page and applies supported facts. Your corrections stay in place.</p>{% endif %}
@@ -125,9 +135,24 @@
         <button type="button" class="btn btn-exclude {% if action_state.excluded %}is-on{% endif %}" data-action="excluded" data-listing="{{ row.listing_id }}">{% if action_state.excluded %}Excluded — undo{% else %}Exclude from results{% endif %}</button>
       </div><p id="decision-feedback" class="decision-feedback" role="status" aria-live="polite"></p></section>
       <section class="rail-section"><h2>Hunt progress</h2><form method="post" action="/listings/{{ row.listing_id }}/progress" class="compact-form"><label for="stage">Current stage</label><select id="stage" name="stage">{% for stage in ['spotted','shortlisted','contacted','replied','viewing_booked','viewed','applied','rejected','removed'] %}<option value="{{ stage }}" {% if hunt_progress.stage == stage %}selected{% endif %}>{{ stage|replace('_',' ')|title }}</option>{% endfor %}</select><label for="viewing_at">Viewing date and time</label><input id="viewing_at" name="viewing_at" type="datetime-local"><button type="submit" class="btn btn-secondary">Update progress</button>{% if hunt_progress.viewing_at %}<a class="text-link" href="/listings/{{ row.listing_id }}/viewing.ics">Add viewing to calendar</a>{% endif %}</form></section>
-      <details class="rail-disclosure" {% if correction_error or corrected %}open{% endif %}><summary>Correct listing facts</summary><div class="rail-disclosure-body">
+      <details id="correct-facts" class="rail-disclosure" {% if correction_error or corrected %}open{% endif %}><summary>Correct listing facts</summary><div class="rail-disclosure-body">
         {% if correction_error %}<p class="profile-banner profile-banner-err" role="alert">{{ correction_error }}</p>{% endif %}{% if corrected %}<p class="profile-banner profile-banner-ok" role="status">Correction applied and ranking updated.</p>{% endif %}
-        <form method="post" action="/listings/{{ row.listing_id }}/correct" class="compact-form"><label for="correction_field">Fact</label><select id="correction_field" name="field"><option value="rent">Monthly rent</option><option value="beds">Bedrooms</option><option value="baths">Bathrooms</option><option value="area">Area</option><option value="floor">Floor</option><option value="parking_available">Parking available</option><option value="in_suite_laundry">In-suite laundry</option><option value="available_date">Available date</option><option value="lease_months">Lease length</option><option value="total_monthly">Total monthly cost</option></select><label for="correction_value">Correct value</label><input id="correction_value" name="value" required placeholder="Number, date, or yes/no"><button type="submit" class="btn btn-secondary">Apply correction</button></form>
+        <form method="post" action="/listings/{{ row.listing_id }}/correct" class="compact-form">
+          <label for="correction_field">Fact</label>
+          <select id="correction_field" name="field">
+            <option value="rent">Monthly rent</option><option value="beds">Bedrooms</option>
+            <option value="baths">Bathrooms</option><option value="area">Area</option>
+            <option value="floor">Floor</option><option value="parking_available">Parking available</option>
+            <option value="in_suite_laundry">In-suite laundry</option><option value="basement">Basement unit</option>
+            <option value="full_unit">Entire unit (not a shared room)</option>
+            <option value="furnishing">Furnishing</option><option value="available_date">Available date</option>
+            <option value="lease_months">Lease length</option><option value="total_monthly">Total monthly cost</option>
+          </select>
+          <label for="correction_value">Correct value</label>
+          <input id="correction_value" name="value" required aria-describedby="correction-help" placeholder="Number, date, or yes/no">
+          <small id="correction-help">For furnishing: furnished, unfurnished, or optional. For dates: YYYY-MM-DD. For amenities, basement, or entire unit: yes or no.</small>
+          <button type="submit" class="btn btn-secondary">Apply correction</button>
+        </form>
         {% if corrections %}<ul class="action-list" aria-label="Active corrections">{% for correction in corrections %}<li><span>{{ correction.field|replace('attributes.','')|replace('_',' ') }}</span><strong>{{ correction.value }}</strong><form method="post" action="/listings/{{ row.listing_id }}/corrections/reset"><input type="hidden" name="field" value="{{ correction.field }}"><button type="submit" class="text-button">Reset</button></form></li>{% endfor %}</ul>{% endif %}
       </div></details>
       <details class="rail-disclosure"><summary>Notes and history</summary><div class="rail-disclosure-body"><form method="post" action="/listings/{{ row.listing_id }}/note" class="compact-form" data-action-form><label for="note">Add a note</label><textarea id="note" name="note" rows="3" maxlength="4000" placeholder="Viewing notes, questions, or follow-up"></textarea><button type="submit" class="btn btn-secondary">Save note</button></form><h3>Action history</h3>{% if actions %}<ul class="action-list">{% for action in actions %}<li><span>{{ action.kind }}</span><time>{{ action.created_at | relativetime }}</time>{% if action.note %}<p>{{ action.note }}</p>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="empty-small">No actions recorded yet.</p>{% endif %}</div></details>

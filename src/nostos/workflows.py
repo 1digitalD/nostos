@@ -157,7 +157,7 @@ def profile_history(conn: sqlite3.Connection, path: Path) -> list[dict[str, Any]
 CorrectionField = Literal[
     "rent", "beds", "baths", "area", "floor", "parking_available",
     "in_suite_laundry", "available_date", "lease_months", "total_monthly",
-    "research_address",
+    "research_address", "basement", "furnishing", "full_unit",
 ]
 
 
@@ -174,7 +174,7 @@ def correct_listing_fact(
     allowed = {
         "rent", "beds", "baths", "area", "floor", "parking_available",
         "in_suite_laundry", "available_date", "lease_months", "total_monthly",
-        "research_address",
+        "research_address", "basement", "furnishing", "full_unit",
     }
     if field not in allowed:
         raise ValueError("Unknown correction field.")
@@ -211,7 +211,11 @@ def correct_listing_fact(
             raise ValueError("Address must be 240 characters or fewer.")
         storage_field = "attributes.research_address"
         parsed = cleaned
-    elif field in {"parking_available", "in_suite_laundry"}:
+    elif field == "furnishing":
+        parsed = cleaned.lower()
+        if parsed not in {"furnished", "unfurnished", "optional"}:
+            raise ValueError("Enter furnished, unfurnished, or optional.")
+    elif field in {"parking_available", "in_suite_laundry", "basement", "full_unit"}:
         normalized = cleaned.lower()
         if normalized not in {"yes", "no", "true", "false"}:
             raise ValueError("Choose yes or no.")
@@ -242,7 +246,8 @@ def clear_listing_correction(conn: sqlite3.Connection, *, listing_id: str, field
         "rent", "beds", "baths", "area", "floor",
         "attributes.parking_available", "attributes.in_suite_laundry",
         "attributes.available_date", "attributes.lease_months", "attributes.total_monthly",
-        "attributes.research_address",
+        "attributes.research_address", "attributes.basement", "furnishing",
+        "attributes.full_unit",
     }
     if field not in allowed:
         raise ValueError("Unknown correction field.")

@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import extruct
@@ -15,6 +15,8 @@ from selectolax.parser import HTMLParser
 from nostos.context import SearchContext
 from nostos.enrich.location import point_from_html
 from nostos.enrich.text import (
+    _FULL_UNIT_RE,
+    _ROOM_ONLY_RE,
     furnishing_from_text,
     infer_area_key_from_neighborhood_text,
     neighborhood_haystack,
@@ -39,8 +41,8 @@ FetchText = Callable[[str], str]
 NowProvider = Callable[[], datetime]
 
 _KIJIJI_ID_RE = re.compile(r"/(\d{9,10})(?:$|\?|#)")
-_ROOM_ONLY_RE = re.compile(
-    r"\b(room for rent|shared (?:home|house|apartment|unit)|roommate)\b",
+_PRIVATE_ROOMS_FOR_RENT_RE = re.compile(
+    r"\b(?:private\s+)?rooms?\s+for\s+rent\b",
     flags=re.IGNORECASE,
 )
 _REQUEST_HEADERS = {"User-Agent": "nostos/0.1", "Accept-Language": "en-CA,en;q=0.9"}
@@ -191,6 +193,11 @@ class KijijiSource:
         furnishing_fact = furnishing_from_text(
             " ".join(part for part in (title, description) if part)
         )
+        parking, parking_attributes = _parking_fields(
+            parking_fact,
+            observed_at,
+            structured_value=payload.get("parking"),
+        )
 
         place = Place.model_validate(
             {
@@ -201,7 +208,7 @@ class KijijiSource:
             },
             context={"area_vocabulary": ctx.area_vocabulary},
         )
-        attributes: dict[str, Observed[str] | Absence] = {}
+        attributes: dict[str, Observed[Any] | Absence] = {}
         if title:
             attributes["title"] = Observed[str](
                 value=title,
@@ -227,6 +234,18 @@ class KijijiSource:
                 origin=Origin.SOURCE_FIELD,
                 confidence=1.0,
                 evidence="kijiji structured location",
+                observed_at=observed_at,
+            )
+        attributes.update(parking_attributes)
+        # Saved booleans from older parsers included an unsupported positive
+        # default. Re-derive this parser-owned claim from explicit saved text.
+        full_unit = _full_unit_from_text(" ".join(part for part in (title, description) if part))
+        if full_unit is not None:
+            attributes["full_unit"] = Observed[bool](
+                value=full_unit,
+                origin=Origin.TEXT_RULE,
+                confidence=0.8,
+                evidence="kijiji saved listing text",
                 observed_at=observed_at,
             )
         photos = _photo_list(payload.get("photos"))
@@ -261,7 +280,7 @@ class KijijiSource:
                 observed_at=observed_at,
             ),
             floor=Absence.NOT_STATED,
-            parking=_parking_field(parking_fact, observed_at),
+            parking=parking,
             furnishing=_furnishing_field(furnishing_fact, observed_at),
             photos=photos,
             attributes=attributes,
@@ -387,8 +406,18 @@ def _item_payload(item: Mapping[str, object]) -> dict[str, object]:
         "photos_truncated": len(all_images) > DETAIL_PHOTO_MAX,
         "parking": parking_fact[0] if parking_fact is not None else None,
         "furnishing": furnishing,
-        "full_unit": not bool(_ROOM_ONLY_RE.search(haystack)) if haystack else None,
+        "full_unit": _full_unit_from_text(haystack),
     }
+
+
+def _full_unit_from_text(text: str) -> bool | None:
+    if not text:
+        return None
+    if _ROOM_ONLY_RE.search(text) or _PRIVATE_ROOMS_FOR_RENT_RE.search(text):
+        return False
+    if _FULL_UNIT_RE.search(text):
+        return True
+    return None
 
 
 def _detail_payload(*, html: str, base_url: str) -> dict[str, object]:
@@ -658,7 +687,7 @@ def _float_field(
 
 def _area_field(*, value: object, unit: str, observed_at: datetime) -> Observed[Area] | Absence:
     numeric = _as_float(value)
-    if numeric is None:
+    if numeric is None or numeric <= 0:
         return Absence.NOT_STATED
     return Observed[Area](
         value=Area(value=numeric, unit=unit),
@@ -669,20 +698,58 @@ def _area_field(*, value: object, unit: str, observed_at: datetime) -> Observed[
     )
 
 
-def _parking_field(
+def _parking_fields(
     fact: tuple[str, str] | None,
     observed_at: datetime,
-) -> Observed[str] | Absence:
-    if fact is None:
-        return Absence.NOT_STATED
-    value, evidence = fact
-    return Observed[str](
-        value=value,
-        origin=Origin.TEXT_RULE,
-        confidence=0.8,
-        evidence=evidence,
+    *,
+    structured_value: object = None,
+) -> tuple[Observed[str] | Absence, dict[str, Observed[Any] | Absence]]:
+    text_field: Observed[str] | None = None
+    text_available: bool | None = None
+    if fact is not None:
+        value, evidence = fact
+        text_available = value != "Unavailable"
+        text_field = Observed[str](
+            value=value,
+            origin=Origin.TEXT_RULE,
+            confidence=0.8,
+            evidence=evidence,
+            observed_at=observed_at,
+        )
+
+    if not isinstance(structured_value, bool):
+        return text_field or Absence.NOT_STATED, {}
+
+    structured_field = Observed[bool](
+        value=structured_value,
+        origin=Origin.SOURCE_FIELD,
+        confidence=1.0,
+        evidence="kijiji parking field",
         observed_at=observed_at,
     )
+    if text_field is not None and text_available != structured_value:
+        return Absence.CONTRADICTORY, {
+            "parking_available": Absence.CONTRADICTORY,
+            "parking_text_claim": Observed[bool](
+                value=bool(text_available),
+                origin=Origin.TEXT_RULE,
+                confidence=0.8,
+                evidence=text_field.evidence,
+                observed_at=observed_at,
+            ),
+            "parking_source_claim": structured_field,
+        }
+
+    parking = text_field
+    if parking is None:
+        parking = Observed[str](
+            value="Available" if structured_value else "Unavailable",
+            origin=Origin.SOURCE_FIELD,
+            confidence=1.0,
+            evidence="kijiji parking field",
+            observed_at=observed_at,
+        )
+    return parking, {"parking_available": structured_field}
 
 
 def _furnishing_field(

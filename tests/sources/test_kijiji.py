@@ -10,7 +10,10 @@ from typing import Any
 from nostos.config.citypack import Citypack
 from nostos.config.profile import Profile
 from nostos.context import SearchContext
-from nostos.model import Absence, Area, Listing, Observed, SourceRecord
+from nostos.decision import build_decision_brief
+from nostos.enrich.chain import run_enricher_chain
+from nostos.enrich.text import TextRuleEnricher
+from nostos.model import Absence, Area, Listing, Observed, Origin, SourceRecord
 from nostos.rank.profile_scoring import passes_hard_filters
 from nostos.sources.base import Liveness
 from nostos.sources.kijiji import KijijiSource, _detail_payload
@@ -33,7 +36,7 @@ def test_discover_parses_jsonld_itemlist_from_fixture() -> None:
     payload = _payload_mapping(records[0].payload)
     assert payload["title"] == "Bright 2 Bedroom in Kits"
     assert payload["price"] == 2895
-    assert payload["full_unit"] is True
+    assert payload["full_unit"] is None
     assert payload["furnishing"] == "furnished"
     second_payload = _payload_mapping(records[1].payload)
     assert second_payload["full_unit"] is False
@@ -42,6 +45,49 @@ def test_discover_parses_jsonld_itemlist_from_fixture() -> None:
     assert fetcher.urls == [
         "https://www.kijiji.ca/b-apartments-condos/vancouver/kitsilano/k0c37l1700287"
     ]
+
+
+def test_discover_requires_explicit_evidence_for_full_unit_scope() -> None:
+    html = """
+    <html><head><script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "ItemList",
+      "itemListElement": [
+        {"item": {
+          "@type": "Product",
+          "url": "https://www.kijiji.ca/v-apartments-condos/1742000010",
+          "name": "Private rooms near transit",
+          "description": "Private Rooms for Rent with Shared Kitchen and Bathroom"
+        }},
+        {"item": {
+          "@type": "Product",
+          "url": "https://www.kijiji.ca/v-apartments-condos/1742000011",
+          "name": "Quiet home",
+          "description": "Entire apartment available for one household"
+        }},
+        {"item": {
+          "@type": "Product",
+          "url": "https://www.kijiji.ca/v-apartments-condos/1742000012",
+          "name": "Bright apartment",
+          "description": "Close to transit and groceries"
+        }}
+      ]
+    }
+    </script></head></html>
+    """
+    source = KijijiSource(fetcher=lambda _: html, now_provider=_fixed_now)
+
+    records = list(source.discover(_build_context()))
+    full_unit_by_id = {
+        record.source_id: _payload_mapping(record.payload)["full_unit"] for record in records
+    }
+
+    assert full_unit_by_id == {
+        "1742000010": False,
+        "1742000011": True,
+        "1742000012": None,
+    }
 
 
 def test_fetch_detail_enriches_discovery_record() -> None:
@@ -97,6 +143,26 @@ def test_to_listing_is_pure_and_structured() -> None:
     assert listing.parking == Absence.NOT_STATED
     assert isinstance(listing.furnishing, Observed)
     assert listing.furnishing.value == "furnished"
+
+
+def test_to_listing_treats_zero_floor_area_as_unstated() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742000001",
+        url="https://www.kijiji.ca/v-apartments-condos/1742000001",
+        content_hash="hash-zero-area",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "One bedroom apartment",
+            "description": "Bright apartment near transit.",
+            "area_sqft": 0,
+            "price": 1800,
+        },
+    )
+
+    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, _build_context())
+
+    assert listing.area == Absence.NOT_STATED
 
 
 def test_to_listing_does_not_infer_area_key_from_description_only() -> None:
@@ -215,25 +281,91 @@ def test_to_listing_basement_storage_text_passes_hard_filter_when_excluded() -> 
     assert passes_hard_filters(listing, context.profile) is True
 
 
-def test_to_listing_rejects_legacy_parking_boolean_without_raw_evidence() -> None:
-    record = SourceRecord(
+def test_to_listing_uses_structured_parking_booleans_when_text_is_silent() -> None:
+    available_record = SourceRecord(
         source="kijiji",
         source_id="1742684287",
         url="https://www.kijiji.ca/v-apartments-condos/1742684287",
-        content_hash="hash-legacy-parking",
+        content_hash="hash-structured-parking-available",
         fetched_at=_fixed_now(),
         payload={
             "title": "Bright two bedroom apartment",
-            "description": "Secure bicycle storage in the garage.",
-            "address": "123 Main Street Vancouver BC",
+            "description": "Quiet purpose-built rental near transit.",
             "parking": True,
             "price": 2500,
         },
     )
+    unavailable_record = SourceRecord(
+        source="kijiji",
+        source_id="1742684291",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684291",
+        content_hash="hash-structured-parking-unavailable",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Bright one bedroom apartment",
+            "description": "Quiet purpose-built rental near transit.",
+            "parking": False,
+            "price": 2100,
+        },
+    )
 
-    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, _build_context())
+    source = KijijiSource(now_provider=_fixed_now)
+    available = source.to_listing(available_record, _build_context())
+    unavailable = source.to_listing(unavailable_record, _build_context())
 
-    assert listing.parking == Absence.NOT_STATED
+    assert isinstance(available.parking, Observed)
+    assert available.parking.value == "Available"
+    assert available.parking.origin is Origin.SOURCE_FIELD
+    assert isinstance(unavailable.parking, Observed)
+    assert unavailable.parking.value == "Unavailable"
+    assert unavailable.parking.origin is Origin.SOURCE_FIELD
+
+
+def test_to_listing_preserves_parking_disagreement_as_contradictory() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="1742684292",
+        url="https://www.kijiji.ca/v-apartments-condos/1742684292",
+        content_hash="hash-structured-parking-conflict",
+        fetched_at=_fixed_now(),
+        payload={
+            "title": "Bright two bedroom apartment",
+            "description": "Parking available for $150 per month.",
+            "parking": False,
+            "price": 2500,
+        },
+    )
+
+    context = _build_context(require_parking=True)
+    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, context)
+
+    assert listing.parking == Absence.CONTRADICTORY
+    assert listing.attributes["parking_available"] == Absence.CONTRADICTORY
+    text_claim = listing.attributes["parking_text_claim"]
+    source_claim = listing.attributes["parking_source_claim"]
+    assert isinstance(text_claim, Observed)
+    assert text_claim.value is True
+    assert text_claim.evidence == "Parking available"
+    assert isinstance(source_claim, Observed)
+    assert source_claim.value is False
+    assert source_claim.evidence == "kijiji parking field"
+
+    enriched = run_enricher_chain(listing, [TextRuleEnricher()], context)
+    assert enriched.parking == Absence.CONTRADICTORY
+    assert enriched.attributes["parking_available"] == Absence.CONTRADICTORY
+
+    brief = build_decision_brief(
+        enriched,
+        context.profile,
+        extraction_current=True,
+        now=_fixed_now(),
+    )
+    assert brief.status == "unverified"
+    assert brief.headline != "Saved facts fit your criteria"
+    assert any(
+        check.field == "parking" and check.status == "unknown" and "contradictory" in check.reason
+        for check in brief.checks
+    )
 
 
 def test_to_listing_rederives_negative_furnishing_label_from_raw_text() -> None:
@@ -254,6 +386,19 @@ def test_to_listing_rederives_negative_furnishing_label_from_raw_text() -> None:
 
     assert isinstance(listing.furnishing, Observed)
     assert listing.furnishing.value == "unfurnished"
+
+
+def test_old_full_unit_default_is_not_reused_without_supporting_text() -> None:
+    record = SourceRecord(
+        source="kijiji",
+        source_id="legacy-scope",
+        url="https://www.kijiji.ca/legacy-scope",
+        content_hash="legacy-scope",
+        fetched_at=_fixed_now(),
+        payload={"title": "Quiet apartment", "full_unit": True},
+    )
+    listing = KijijiSource(now_provider=_fixed_now).to_listing(record, _build_context())
+    assert "full_unit" not in listing.attributes
 
 
 def test_to_listing_preserves_explicit_negative_and_paid_parking_evidence() -> None:
@@ -279,8 +424,10 @@ def test_to_listing_preserves_explicit_negative_and_paid_parking_evidence() -> N
     no_parking_listing = source.to_listing(no_parking, _build_context())
     paid_parking_listing = source.to_listing(paid_parking, _build_context())
 
-    assert isinstance(no_parking_listing.parking, Observed)
-    assert no_parking_listing.parking.value == "Unavailable"
+    assert no_parking_listing.parking == Absence.CONTRADICTORY
+    text_claim = no_parking_listing.attributes["parking_text_claim"]
+    assert isinstance(text_claim, Observed)
+    assert text_claim.value is False
     assert isinstance(paid_parking_listing.parking, Observed)
     assert paid_parking_listing.parking.value == "Available"
 
@@ -324,8 +471,7 @@ def test_detail_parser_extracts_image_objects_and_bounds_gallery() -> None:
         "image": images,
     }
     html = (
-        '<html><head><script type="application/ld+json">'
-        f"{json.dumps(node)}</script></head></html>"
+        f'<html><head><script type="application/ld+json">{json.dumps(node)}</script></head></html>'
     )
 
     payload = _detail_payload(
@@ -460,7 +606,9 @@ def _fixed_now() -> datetime:
     return datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
-def _build_context(*, exclude: list[str] | None = None) -> SearchContext:
+def _build_context(
+    *, exclude: list[str] | None = None, require_parking: bool = False
+) -> SearchContext:
     citypack = Citypack.model_validate(
         {
             "name": "vancouver",
@@ -507,7 +655,10 @@ def _build_context(*, exclude: list[str] | None = None) -> SearchContext:
     profile = Profile.model_validate(
         {
             "city": "vancouver",
-            "hard": {"exclude": exclude or []},
+            "hard": {
+                "exclude": exclude or [],
+                "require_parking": require_parking,
+            },
             "weights": {},
             "sources": {"kijiji": "on"},
             "notify": [],

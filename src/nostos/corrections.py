@@ -51,6 +51,8 @@ def apply_user_corrections(
             value = float(raw)
         elif field == "floor":
             value = int(raw)
+        elif field == "furnishing":
+            value = str(raw)
         else:
             key = field.removeprefix("attributes.")
             attributes[key] = Observed(

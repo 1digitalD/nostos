@@ -7,6 +7,8 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Mapping
+from contextlib import closing
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -24,6 +26,7 @@ from nostos.config.wizard import (
     missing_required_values,
 )
 from nostos.context import load_search_context
+from nostos.decision import build_decision_brief
 from nostos.enrich.text import TextRuleEnricher
 from nostos.model import SourceRecord
 from nostos.rank.engine import NormalizationWindow, RuleContribution, ScoreResult
@@ -49,7 +52,7 @@ from nostos.store.db import apply_migrations, connect
 from nostos.store.repo import ScoreRepo
 from nostos.watch.notify import NullNotifier
 from nostos.watch.runner import run_watch
-from nostos.web.query import ListFilter
+from nostos.web.query import ListFilter, load_detail
 from nostos.workflows import (
     apply_profile,
     preview_profile,
@@ -646,6 +649,87 @@ def explain_command(
     typer.echo(explanation)
 
 
+@app.command("decision")
+def decision_command(
+    listing_id: Annotated[str, typer.Argument(help="Listing ID to assess.")],
+    profile: Annotated[
+        Path | None,
+        typer.Option(
+            "--profile",
+            help="Profile file path. Defaults to XDG config location.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path | None,
+        typer.Option("--db", help="SQLite DB path. Defaults to XDG data location."),
+    ] = None,
+    citypack: Annotated[
+        Path | None,
+        typer.Option(
+            "--citypack",
+            help="Citypack path. Defaults to the packaged citypack for the profile city.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Render the decision brief as JSON."),
+    ] = False,
+) -> None:
+    """Read a saved listing and produce a conservative decision brief.
+
+    This command reads the current corrected listing projection. It never
+    fetches, migrates, or writes the SQLite database.
+
+    Examples:
+      nostos decision craigslist:abc123
+      nostos decision stub:listing-1 --profile ./profile.yaml --db ./nostos.db \
+        --citypack ./citypack.yaml --json
+    """
+
+    profile_path = _resolve_profile_path(profile)
+    db_path = _resolve_db_path(db, profile_path=profile_path)
+    citypack_path = _resolve_citypack_path(citypack, profile_path=profile_path)
+    _require_file(profile_path, "--profile")
+    _require_file(db_path, "--db")
+    _require_file(citypack_path, "--citypack")
+
+    context = load_search_context(citypack_path=citypack_path, profile_path=profile_path)
+    sources = {source.name: source for source in _instantiate_sources(source_names=None)}
+    with closing(_connect_read_only(db_path)) as conn:
+        row = load_detail(
+            conn,
+            listing_id=listing_id,
+            context=context,
+            profile_id=_profile_id(profile_path),
+            sources=sources,
+        )
+    if row is None:
+        _fail(f"Listing not found: {listing_id}")
+
+    brief = build_decision_brief(
+        row.listing,
+        context.profile,
+        extraction_current=row.extraction_current,
+        excluded=row.is_excluded,
+        dismissed=row.dismissed,
+    )
+    payload = asdict(brief)
+    if json_output:
+        typer.echo(json.dumps(payload, default=str, indent=2))
+        return
+
+    typer.echo(f"headline={brief.headline}")
+    typer.echo(f"status={brief.status}")
+    typer.echo(f"captured_at={brief.captured_at}")
+    typer.echo(f"stale={str(brief.stale).lower()}")
+    for blocker in brief.blockers:
+        typer.echo(f"blocker={blocker}")
+    for question in brief.questions:
+        typer.echo(f"question={question}")
+    for check in payload["checks"]:
+        typer.echo(f"check={check}")
+
+
 def _criteria_paths(profile: Path | None, db: Path | None) -> tuple[Path, Path, Path]:
     profile_path = _resolve_profile_path(profile)
     db_path = _resolve_db_path(db, profile_path=profile_path)
@@ -1024,6 +1108,15 @@ def _instantiate_sources(*, source_names: Iterable[str] | None) -> tuple[Source,
         instance = factory()
         instances.append(instance)
     return tuple(instances)
+
+
+def _connect_read_only(path: Path) -> sqlite3.Connection:
+    """Open an existing SQLite database without permitting writes."""
+
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def _resolve_profile_path(path: Path | None) -> Path:
